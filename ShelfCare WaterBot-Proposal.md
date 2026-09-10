@@ -9,8 +9,8 @@ ShelfCare automates watering plants stored on a wall shelf beyond easy reach. Ar
 
 **Each student's robot model**
 
-* Jayden Kim: reBot B601-DM, modelled under the new-hardware exception (no supplied 41013 or Corke toolbox model; matches the group's real robot).  
-* Rudra Sah proposes the Stäubli TX2-60, a six-DoF industrial arm absent from both the 41013 catalogue and Corke's toolbox. Its published kinematic dimensions and 5 kg payload comfortably support lifting a potted plant off a shelf and placing it on the watering platform without tipping. 
+* Student 1: reBot B601-DM, modelled under the new-hardware exception (no supplied 41013 or Corke toolbox model; matches the group's real robot).  
+* Student 2 proposes the Stäubli TX2-60, a six-DoF industrial arm absent from both the 41013 catalogue and Corke's toolbox. Its published kinematic dimensions and 5 kg payload comfortably support lifting a potted plant off a shelf and placing it on the watering platform without tipping. 
 
 **Github link:** [https://github.com/AnimatedWhale/Plants\_Do\_be\_Watered](https://github.com/AnimatedWhale/Plants_Do_be_Watered) 
 
