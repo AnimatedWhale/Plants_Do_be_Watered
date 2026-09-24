@@ -12,7 +12,7 @@ from math import pi
 import numpy as np
 import roboticstoolbox as rtb
 
-from rebot_b601_dm import ReBotB601DM  # your model, from models/rebot_b601_dm.py
+from models.rebot_b601_dm import ReBotB601DM
 
 
 # ---------------------------------------------------------------------
