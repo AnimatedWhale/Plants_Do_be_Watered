@@ -1,4 +1,18 @@
 # reBot B601-DM — DH parameter model
+
+phi = arctan(0.054 / 0.2426) ~= 0.2190 rad ~= 12.55 degrees
+
+At q = [0,0,0,0,0,0], fkine should give an end-effector position of
+approximately (0.260, 0, 0.192) m.
+
+## Sources
+- Kinematic structure: Seeed `reBotArm_control_py` URDF, DM variant.
+  https://github.com/Seeed-Studio/reBotArm_control_py
+- Payload, weight, official joint limits: Seeed Studio product page.
+  https://www.seeedstudio.com/reBot-Arm-B601-DM-p-6740.html
+
+## Code
+
 ```python
 import numpy as np
 from math import pi
