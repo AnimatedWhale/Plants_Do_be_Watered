@@ -1,0 +1,175 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 680" width="960" height="680" font-family="Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="ax" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#d62728"/>
+    </marker>
+    <marker id="az" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#1f5fbf"/>
+    </marker>
+    <marker id="dim" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+      <path d="M0,5 L10,5" stroke="#555" stroke-width="2"/>
+    </marker>
+  </defs>
+
+  <rect width="960" height="680" fill="#ffffff"/>
+
+  <text x="30" y="38" font-size="20" font-weight="bold" fill="#222">Stäubli TX2-60: standard DH frames at q = 0 (arm straight up)</text>
+  <text x="30" y="60" font-size="13" fill="#555">Side view, world x to the right, z up, y into the page. Dimensions in mm, not to exact scale for the tool.</text>
+
+  <!-- ground -->
+  <line x1="200" y1="620" x2="400" y2="620" stroke="#444" stroke-width="2"/>
+  <g stroke="#999" stroke-width="1">
+    <line x1="210" y1="620" x2="200" y2="632"/><line x1="230" y1="620" x2="220" y2="632"/>
+    <line x1="250" y1="620" x2="240" y2="632"/><line x1="270" y1="620" x2="260" y2="632"/>
+    <line x1="290" y1="620" x2="280" y2="632"/><line x1="310" y1="620" x2="300" y2="632"/>
+    <line x1="330" y1="620" x2="320" y2="632"/><line x1="350" y1="620" x2="340" y2="632"/>
+    <line x1="370" y1="620" x2="360" y2="632"/><line x1="390" y1="620" x2="380" y2="632"/>
+  </g>
+
+  <!-- robot body (translucent so the frames read on top) -->
+  <g stroke="#666" stroke-width="1.2">
+    <rect x="270" y="540" width="60" height="80" fill="#555" fill-opacity="0.35"/>
+    <rect x="278" y="470" width="44" height="70" fill="#bbb" fill-opacity="0.35"/>
+    <rect x="289" y="354" width="22" height="116" fill="#bbb" fill-opacity="0.35"/>
+    <rect x="292" y="230" width="16" height="124" fill="#bbb" fill-opacity="0.35"/>
+    <rect x="295" y="202" width="10" height="28" fill="#bbb" fill-opacity="0.35"/>
+    <rect x="284" y="196" width="32" height="6" fill="#555" fill-opacity="0.5"/>
+    <rect x="286" y="160" width="4" height="36" fill="#555" fill-opacity="0.5"/>
+    <rect x="310" y="160" width="4" height="36" fill="#555" fill-opacity="0.5"/>
+  </g>
+  <!-- joint housings: circles = axis into the page, ellipses = axis along the link -->
+  <g fill="#f2b21b" fill-opacity="0.45" stroke="#b07d00" stroke-width="1.2">
+    <ellipse cx="300" cy="520" rx="30" ry="6"/>
+    <circle cx="300" cy="470" r="18"/>
+    <circle cx="300" cy="354" r="15"/>
+    <ellipse cx="300" cy="300" rx="14" ry="4"/>
+    <circle cx="300" cy="230" r="11"/>
+    <ellipse cx="300" cy="209" rx="10" ry="3"/>
+  </g>
+  <g font-size="13" font-weight="bold" fill="#8a6200" text-anchor="end">
+    <text x="244" y="524">J1</text>
+    <text x="244" y="492">J2</text>
+    <text x="244" y="376">J3</text>
+    <text x="244" y="318">J4</text>
+    <text x="244" y="250">J5</text>
+    <text x="244" y="212">J6</text>
+  </g>
+
+  <!-- dimensions -->
+  <g stroke="#555" stroke-width="1" fill="none">
+    <line x1="210" y1="620" x2="210" y2="162"/>
+    <line x1="204" y1="620" x2="216" y2="620"/><line x1="204" y1="470" x2="216" y2="470"/>
+    <line x1="204" y1="354" x2="216" y2="354"/><line x1="204" y1="230" x2="216" y2="230"/>
+    <line x1="204" y1="202" x2="216" y2="202"/><line x1="204" y1="162" x2="216" y2="162"/>
+  </g>
+  <g font-size="13" fill="#333" text-anchor="end">
+    <text x="200" y="549">d1 = 375</text>
+    <text x="200" y="416">a2 = 290</text>
+    <text x="200" y="286">d4 = 310</text>
+    <text x="200" y="220">d6 = 70</text>
+    <text x="200" y="186" fill="#888">tool = 150</text>
+  </g>
+
+  <!-- frames: red = x, blue = z, circle-cross = z into the page -->
+  <g stroke-width="3" fill="none">
+    <!-- F0 -->
+    <line x1="300" y1="620" x2="300" y2="566" stroke="#1f5fbf" marker-end="url(#az)"/>
+    <line x1="300" y1="620" x2="360" y2="620" stroke="#d62728" marker-end="url(#ax)"/>
+    <!-- F1 -->
+    <line x1="300" y1="470" x2="360" y2="470" stroke="#d62728" marker-end="url(#ax)"/>
+    <!-- F2 -->
+    <line x1="300" y1="354" x2="300" y2="300" stroke="#d62728" marker-end="url(#ax)"/>
+    <!-- F3 (drawn displaced) -->
+    <line x1="440" y1="390" x2="440" y2="336" stroke="#1f5fbf" marker-end="url(#az)"/>
+    <line x1="440" y1="390" x2="500" y2="390" stroke="#d62728" marker-end="url(#ax)"/>
+    <!-- F4 -->
+    <line x1="300" y1="230" x2="360" y2="230" stroke="#d62728" marker-end="url(#ax)"/>
+    <!-- F5 (drawn displaced) -->
+    <line x1="440" y1="266" x2="440" y2="212" stroke="#1f5fbf" marker-end="url(#az)"/>
+    <line x1="440" y1="266" x2="500" y2="266" stroke="#d62728" marker-end="url(#ax)"/>
+    <!-- F6 -->
+    <line x1="300" y1="202" x2="300" y2="148" stroke="#1f5fbf" marker-end="url(#az)"/>
+    <line x1="300" y1="202" x2="360" y2="202" stroke="#d62728" marker-end="url(#ax)"/>
+  </g>
+  <!-- z into page symbols -->
+  <g stroke="#1f5fbf" stroke-width="2" fill="#fff">
+    <circle cx="300" cy="470" r="7"/><line x1="295" y1="465" x2="305" y2="475"/><line x1="305" y1="465" x2="295" y2="475"/>
+    <circle cx="300" cy="354" r="7"/><line x1="295" y1="349" x2="305" y2="359"/><line x1="305" y1="349" x2="295" y2="359"/>
+    <circle cx="300" cy="230" r="7"/><line x1="295" y1="225" x2="305" y2="235"/><line x1="305" y1="225" x2="295" y2="235"/>
+  </g>
+  <!-- leaders to displaced frames -->
+  <g stroke="#888" stroke-width="1" stroke-dasharray="4 3">
+    <line x1="308" y1="360" x2="434" y2="386"/>
+    <line x1="308" y1="236" x2="434" y2="262"/>
+  </g>
+  <!-- TCP -->
+  <circle cx="300" cy="162" r="4" fill="#222"/>
+
+  <!-- frame labels -->
+  <g font-size="14" font-weight="bold">
+    <text x="306" y="578" fill="#1f5fbf">z0</text><text x="364" y="615" fill="#d62728">x0</text>
+    <text x="324" y="458" fill="#1f5fbf">z1</text><text x="364" y="466" fill="#d62728">x1</text>
+    <text x="324" y="345" fill="#1f5fbf">z2</text><text x="306" y="304" fill="#d62728">x2</text>
+    <text x="446" y="342" fill="#1f5fbf">z3</text><text x="504" y="394" fill="#d62728">x3</text>
+    <text x="316" y="222" fill="#1f5fbf">z4</text><text x="364" y="234" fill="#d62728">x4</text>
+    <text x="446" y="218" fill="#1f5fbf">z5</text><text x="504" y="270" fill="#d62728">x5</text>
+    <text x="306" y="150" fill="#1f5fbf">z6</text><text x="364" y="198" fill="#d62728">x6</text>
+    <text x="320" y="170" fill="#222">TCP</text>
+  </g>
+  <g font-size="12" fill="#555">
+    <text x="440" y="410">O3 = O2 moved d3 = 20 mm</text>
+    <text x="440" y="424">into the page (along z2)</text>
+    <text x="440" y="286">O5 = O4 (same point,</text>
+    <text x="440" y="300">the wrist centre)</text>
+    <text x="30" y="600">O0 at the base floor, on the J1 axis.</text>
+  </g>
+
+  <!-- legend -->
+  <g font-size="12" fill="#333">
+    <line x1="30" y1="650" x2="60" y2="650" stroke="#d62728" stroke-width="3" marker-end="url(#ax)"/>
+    <text x="68" y="654">x axis</text>
+    <line x1="120" y1="650" x2="150" y2="650" stroke="#1f5fbf" stroke-width="3" marker-end="url(#az)"/>
+    <text x="158" y="654">z axis (joint axis)</text>
+    <circle cx="290" cy="650" r="7" fill="#fff" stroke="#1f5fbf" stroke-width="2"/>
+    <line x1="285" y1="645" x2="295" y2="655" stroke="#1f5fbf" stroke-width="2"/>
+    <line x1="295" y1="645" x2="285" y2="655" stroke="#1f5fbf" stroke-width="2"/>
+    <text x="302" y="654">z axis into the page (+y world)</text>
+  </g>
+
+  <!-- DH table -->
+  <g font-size="14" fill="#222">
+    <text x="560" y="100" font-size="16" font-weight="bold">Standard DH table</text>
+    <text x="560" y="118" font-size="12" fill="#555">T(i) = Rz(θi) · Tz(di) · Tx(ai) · Rx(αi)</text>
+    <rect x="556" y="130" width="380" height="30" fill="#eef2f8"/>
+    <g font-weight="bold">
+      <text x="572" y="150">i</text><text x="606" y="150">θi</text>
+      <text x="720" y="150">di</text><text x="796" y="150">ai</text><text x="870" y="150">αi</text>
+    </g>
+    <g>
+      <text x="572" y="184">1</text><text x="606" y="184">q1</text><text x="720" y="184">375</text><text x="796" y="184">0</text><text x="870" y="184">−90°</text>
+      <text x="572" y="214">2</text><text x="606" y="214">q2 − 90°</text><text x="720" y="214">0</text><text x="796" y="214">290</text><text x="870" y="214">0</text>
+      <text x="572" y="244">3</text><text x="606" y="244">q3 + 90°</text><text x="720" y="244">20</text><text x="796" y="244">0</text><text x="870" y="244">+90°</text>
+      <text x="572" y="274">4</text><text x="606" y="274">q4</text><text x="720" y="274">310</text><text x="796" y="274">0</text><text x="870" y="274">−90°</text>
+      <text x="572" y="304">5</text><text x="606" y="304">q5</text><text x="720" y="304">0</text><text x="796" y="304">0</text><text x="870" y="304">+90°</text>
+      <text x="572" y="334">6</text><text x="606" y="334">q6</text><text x="720" y="334">70</text><text x="796" y="334">0</text><text x="870" y="334">0</text>
+    </g>
+    <line x1="556" y1="346" x2="936" y2="346" stroke="#ccc"/>
+    <g font-size="12" fill="#444">
+      <text x="560" y="366">Lengths in mm. The −90° / +90° offsets on θ2, θ3 make q = 0</text>
+      <text x="560" y="382">the vertical pose, same as the Stäubli controller.</text>
+      <text x="560" y="400">Tool: +150 mm along z6 (gripper, measure yours).</text>
+      <text x="560" y="418">Check at q = 0: flange (0, 20, 1045), TCP (0, 20, 1195) mm.</text>
+    </g>
+
+    <text x="560" y="456" font-size="16" font-weight="bold">Joint limits</text>
+    <g font-size="13">
+      <text x="560" y="480">J1 ±180°</text><text x="680" y="480">J2 ±127.5°</text><text x="810" y="480">J3 ±152.5°</text>
+      <text x="560" y="502">J4 ±270°</text><text x="680" y="502">J5 −121° / +132.5°</text><text x="810" y="502">J6 ±270°</text>
+    </g>
+    <g font-size="11" fill="#666">
+      <text x="560" y="540">Link lengths and limits: ROS-Industrial staubli_experimental,</text>
+      <text x="560" y="555">staubli_tx2_60_support/urdf/tx2_60_macro.xacro.</text>
+      <text x="560" y="570">Reach check: 290 + 310 + 70 = 670 mm (Stäubli TX2-60 datasheet).</text>
+    </g>
+  </g>
+</svg>

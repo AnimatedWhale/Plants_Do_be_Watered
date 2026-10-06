@@ -1,0 +1,8 @@
+# Tested with Python 3.11 on Windows:
+# roboticstoolbox-python 1.4.4, spatialgeometry 1.4.1, swift-sim 1.1.0
+roboticstoolbox-python
+spatialgeometry
+spatialmath-python
+swift-sim
+numpy<2
+websockets<14   # swift-sim 1.1 crashes on start ("no running event loop") with websockets 14+
