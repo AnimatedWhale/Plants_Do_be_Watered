@@ -2,8 +2,11 @@ import numpy as np
 from math import pi
 import roboticstoolbox as rtb
 
+from models.link_visuals import attach_stick_geometry
+
 phi = np.arctan2(0.054, 0.2426)
 a3 = np.hypot(0.2426, 0.054)
+
 
 class ReBotB601DM(rtb.DHRobot):
     def __init__(self):
@@ -16,3 +19,8 @@ class ReBotB601DM(rtb.DHRobot):
             rtb.RevoluteDH(d=0.183398,  a=0,        alpha=0,     offset=0,       qlim=[-3.14, 3.14]), # J6 wrist roll
         ]
         super().__init__(links, name="reBot B601-DM")
+
+        MATTE_BLACK = (0.14, 0.16, 0.15, 1)
+        SEEED_YELLOW = (0.73, 0.84, 0.12, 1)
+        link_colours = [MATTE_BLACK, SEEED_YELLOW, SEEED_YELLOW, MATTE_BLACK, MATTE_BLACK, MATTE_BLACK]
+        attach_stick_geometry(self, colour=link_colours)
