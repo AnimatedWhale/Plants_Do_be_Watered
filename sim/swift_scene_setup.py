@@ -3,14 +3,6 @@ ShelfCare Swift scene setup.
 
 two robots, shelf, platform, watering can holder.
 """
- KNOWN ISSUE: robots are not currently appearing in the Swift browser
-# view, even though the geometry is verified correct in isolation
-# (world-space positions, lengths and colours all check out; see
-# sim/robot_shapes.py). Static scene objects (table, wall, sill, etc.)
-# render fine using the same env.add() call. Cause not yet identified —
-# next step is checking whether the Swift browser tab/WebSocket
-# connection itself is the problem, separate from the scene code.
-
 import swift
 import spatialgeometry as geometry
 from spatialmath import SE3
@@ -21,6 +13,16 @@ import roboticstoolbox as rtb
 from models.rebot_b601_dm import ReBotB601DM
 from models.link_visuals import attach_stick_geometry
 
+
+# Compatibility fix (from Rudra): swift-sim 1.1 calls shape._update_pyb(),
+# which spatialgeometry 1.4 renamed to _update_coal(). Alias it so Swift
+# runs correctly with the current spatialgeometry version.
+try:
+    from spatialgeometry.geom.CollisionShape import CollisionShape
+    if not hasattr(CollisionShape, "_update_pyb"):
+        CollisionShape._update_pyb = CollisionShape._update_coal
+except ImportError:
+    pass
 # ---------------------------------------------------------------------
 # Office layout: one large table, both arm bases mounted on its surface,
 # a window sill behind/above the table.
