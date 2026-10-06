@@ -22,9 +22,6 @@ from dataclasses import dataclass
 from math import pi
 from pathlib import Path
 
-# `models` is split across two folders: Jayden-Bot/models (reBot) and the
-# repo root's models (TX2-60). Python merges them, as long as neither
-# folder has an __init__.py.
 for _root in Path(__file__).resolve().parents[1:3]:
     sys.path.insert(0, str(_root))
 
@@ -37,70 +34,50 @@ from collision import Box, VCylinder
 from models.rebot_b601_dm import ReBotB601DM
 from models.staubli_tx2_60 import D1, StaubliTX260
 
-# swift-sim 1.1 calls shape._update_pyb(), which spatialgeometry 1.4 renamed
-# to _update_coal(). Alias it so Swift runs with current spatialgeometry.
 try:
     from spatialgeometry.geom.CollisionShape import CollisionShape
     if not hasattr(CollisionShape, "_update_pyb"):
         CollisionShape._update_pyb = CollisionShape._update_coal
 except ImportError:
-    pass   # older spatialgeometry: still has _update_pyb
+    pass
 
 
-# ---------------------------------------------------------------------
-# Office layout. World frame: x along the desk, y towards the wall, z up.
-# TODO: adjust these once you've measured your actual desk/wall layout
-# ---------------------------------------------------------------------
+TABLE_HEIGHT = 0.75
+TABLE_SIZE = [1.4, 0.7, 0.03]
+TABLE_CENTRE = SE3(0.7, 0.35, TABLE_HEIGHT - TABLE_SIZE[2] / 2)
 
-TABLE_HEIGHT = 0.75                 # top face of the desk
-TABLE_SIZE = [1.4, 0.7, 0.03]       # length (x) x depth (y) x thickness
-TABLE_CENTRE = SE3(0.7, 0.35, TABLE_HEIGHT - TABLE_SIZE[2] / 2)  # cuboid pose is its centre
-
-WALL_Y = 0.75                       # wall sits just behind the desk's back edge
+WALL_Y = 0.75
 WALL_SIZE = [1.4, 0.02, 1.2]
 WALL_CENTRE = SE3(0.7, WALL_Y + WALL_SIZE[1] / 2, TABLE_HEIGHT + WALL_SIZE[2] / 2)
-SHELF_HEIGHT = 1.05                 # top face of the shelf board, within arm 1's reach
+SHELF_HEIGHT = 1.05
 SHELF_SIZE = [0.70, 0.20, 0.02]
 SHELF_CENTRE = SE3(0.25, WALL_Y - SHELF_SIZE[1] / 2, SHELF_HEIGHT - SHELF_SIZE[2] / 2)
 
-# Both arms bolted to the desk top, spaced along its length. Arm 1 sits
-# near the front edge so it has room to reach back to the shelf.
-ARM1_BASE = SE3(0.25, 0.12, TABLE_HEIGHT)   # TX2-60, shelf side
-ARM2_BASE = SE3(1.05, 0.20, TABLE_HEIGHT)   # reBot, pouring side
+ARM1_BASE = SE3(0.25, 0.12, TABLE_HEIGHT)
+ARM2_BASE = SE3(1.05, 0.20, TABLE_HEIGHT)
 
-# Arm 1 parks facing away from the platform (its ready pose, turned 150 deg),
-# so it's out of the reBot's way while watering.
 ARM1_PARK = np.deg2rad([150, 0, 90, 0, 0, 0])
 
-PLATFORM_POSITION = SE3(0.65, 0.30, TABLE_HEIGHT)     # midpoint on the desk, both arms can reach
+PLATFORM_POSITION = SE3(0.65, 0.30, TABLE_HEIGHT)
 PLATFORM_THICKNESS = 0.01
 PLATFORM_TOP = TABLE_HEIGHT + PLATFORM_THICKNESS
 
-CAN_HOLDER_POSITION = SE3(1.10, 0.55, TABLE_HEIGHT)   # fixed spot near arm 2
-CAN_HOLDER_HEIGHT = 0.10                              # stand lifts the can to an easy grip height
+CAN_HOLDER_POSITION = SE3(1.10, 0.55, TABLE_HEIGHT)
+CAN_HOLDER_HEIGHT = 0.10
 CAN_HOLDER_TOP = TABLE_HEIGHT + CAN_HOLDER_HEIGHT
 
-# Last DH frame -> TCP of the reBot's gripper. The reBot DH frame 6 already
-# has z pointing out of the wrist, which is the convention the sequence uses.
-# TODO: set e.g. SE3(0, 0, 0.05) if the TCP sits further out than d6.
 REBOT_TOOL = None
 
-
-# ---------------------------------------------------------------------
-# Scene objects
-# ---------------------------------------------------------------------
 
 def build_table():
     return geometry.Cuboid(scale=TABLE_SIZE, pose=TABLE_CENTRE, color=[0.75, 0.6, 0.45, 1])
 
 
 def build_wall():
-    """Drawn see-through so it doesn't hide the arms."""
     return geometry.Cuboid(scale=WALL_SIZE, pose=WALL_CENTRE, color=[0.85, 0.85, 0.9, 0.25])
 
 
 def build_shelf():
-    """Wall shelf above arm 1 where the plants live."""
     return geometry.Cuboid(scale=SHELF_SIZE, pose=SHELF_CENTRE, color=[0.9, 0.9, 0.88, 1])
 
 
@@ -144,39 +121,60 @@ class Pot:
         self.leaves.T = (T * self._leaves_local).A
 
 
-class WateringCan:
-    """Watering can built from primitives. Its frame sits at the centre of
-    the body, z up, with the spout pointing along +x."""
+class WateringCanDuck:
+    """Garden Basics 1.6L Yellow Duck Plastic Watering Can (Bunnings,
+    I/N 0929940). No published dimensions -- these are estimated, sized
+    to roughly match the stated 1.6 L capacity. Measure the real can and
+    update when you have it.
 
-    RADIUS = 0.05
-    HEIGHT = 0.16
-    SPOUT_LENGTH = 0.14
-    SPOUT_ANGLE = pi / 4    # spout rises 45 deg from horizontal
+    Frame sits at the base centre of the body, z up. The body's local x
+    points toward the bill (the 'front' of the duck). The handle arcs
+    over the top, its bar running along local x, so the gripper grasps
+    it from directly above with fingers closing along local y."""
+
+    BODY_RADIUS = 0.065
+    BODY_HEIGHT = 0.14
+    BILL_LENGTH = 0.05
+    BILL_ANGLE = pi / 12
+
+    HANDLE_HEIGHT = 0.08
+    HANDLE_SPAN = 0.10
+    HANDLE_BAR_RADIUS = 0.008
+
+    COLOUR = [0.95, 0.80, 0.10, 1]
 
     def __init__(self, pose: SE3):
-        color = [0.15, 0.55, 0.35, 1]
-        self.body = geometry.Cylinder(radius=self.RADIUS, length=self.HEIGHT, color=color)
-        self.spout = geometry.Cylinder(radius=0.008, length=self.SPOUT_LENGTH, color=color)
+        self.body = geometry.Cylinder(radius=self.BODY_RADIUS, length=self.BODY_HEIGHT,
+                                       color=self.COLOUR)
+        self.bill = geometry.Cylinder(radius=0.012, length=self.BILL_LENGTH,
+                                       color=[0.9, 0.5, 0.1, 1])
+        self.handle = geometry.Cylinder(radius=self.HANDLE_BAR_RADIUS, length=self.HANDLE_SPAN,
+                                         color=[0.3, 0.3, 0.3, 1])
 
-        root = np.array([self.RADIUS, 0.0, 0.02])   # where the spout leaves the body
-        axis = np.array([np.sin(self.SPOUT_ANGLE), 0.0, np.cos(self.SPOUT_ANGLE)])
-        self._spout_local = SE3(root + axis * self.SPOUT_LENGTH / 2) * SE3.Ry(self.SPOUT_ANGLE)
-        self.spout_tip_local = root + axis * self.SPOUT_LENGTH   # in the can frame
+        bill_root = np.array([self.BODY_RADIUS, 0.0, self.BODY_HEIGHT * 0.6])
+        bill_axis = np.array([np.cos(self.BILL_ANGLE), 0.0, np.sin(self.BILL_ANGLE)])
+        self._bill_local = SE3(bill_root + bill_axis * self.BILL_LENGTH / 2) * SE3.Ry(-self.BILL_ANGLE)
+        self.spout_tip_local = bill_root + bill_axis * self.BILL_LENGTH
+        self.bill_root_local = bill_root
+
+        self._handle_local = SE3(0, 0, self.BODY_HEIGHT + self.HANDLE_HEIGHT) * SE3.Ry(pi / 2)
+        self.handle_grip_local = np.array([0.0, 0.0, self.BODY_HEIGHT + self.HANDLE_HEIGHT])
+        self.handle_bar_direction_local = np.array([1.0, 0.0, 0.0])
 
         self.set_pose(pose)
 
     @property
     def shapes(self):
-        return [self.body, self.spout]
+        return [self.body, self.bill, self.handle]
 
     def set_pose(self, T: SE3):
         self.T = T
         self.body.T = T.A
-        self.spout.T = (T * self._spout_local).A
+        self.bill.T = (T * self._bill_local).A
+        self.handle.T = (T * self._handle_local).A
 
 
 def _segment_pose(p0, p1):
-    """Pose of a cylinder running from p0 to p1 (cylinder axis = local z)."""
     z = (p1 - p0) / np.linalg.norm(p1 - p0)
     ref = [1.0, 0.0, 0.0] if abs(z[0]) < 0.9 else [0.0, 1.0, 0.0]
     o = np.cross(z, ref)
@@ -194,13 +192,12 @@ class StickFigure:
         self.links = [
             (i, geometry.Cylinder(radius=radius, length=np.linalg.norm(pts[i + 1] - pts[i]), color=list(color)))
             for i in range(len(pts) - 1)
-            if np.linalg.norm(pts[i + 1] - pts[i]) > 1e-4   # skip zero-length links
+            if np.linalg.norm(pts[i + 1] - pts[i]) > 1e-4
         ]
         self.joints = [geometry.Sphere(radius=radius * 1.3, color=list(joint_color)) for _ in pts]
         self.update()
 
     def _points(self, q):
-        # fkine_all: base + every joint frame; fkine adds the tool (TCP)
         return [T.t for T in self.robot.fkine_all(q)] + [self.robot.fkine(q).t]
 
     @property
@@ -215,12 +212,7 @@ class StickFigure:
             sphere.T = SE3(p).A
 
 
-# ---------------------------------------------------------------------
-# Build the scene
-# ---------------------------------------------------------------------
-
 def static_obstacles():
-    """The furniture as collision primitives (see collision.py)."""
     return [
         ("desk", Box("desk", TABLE_CENTRE.t, TABLE_SIZE)),
         ("wall", Box("wall", WALL_CENTRE.t, WALL_SIZE)),
@@ -232,29 +224,25 @@ def static_obstacles():
 
 @dataclass
 class Scene:
-    env: object            # swift.Swift, or None when running headless
+    env: object
     arm1: StaubliTX260
     arm2: rtb.Robot
-    can: WateringCan
-    pots: dict             # pot_id -> Pot
-    figures: list          # StickFigures for any DH-only robots
-    obstacles: list        # static_obstacles()
+    can: WateringCanDuck
+    pots: dict
+    figures: list
+    obstacles: list
 
     def refresh(self):
-        """Redraw the stick-figure robots. Call before env.step()."""
         for f in self.figures:
             f.update()
 
 
 def shelf_pose(profile) -> SE3:
-    """Where a pot stands in its shelf slot."""
     x, y = profile.shelf_position
     return SE3(x, y, SHELF_HEIGHT)
 
 
 def build_scene(env=None, pot_profiles=()) -> Scene:
-    """Create every object at its fixed position. Pass env=None to build the
-    robots, pots and can without a browser (used by `--headless`)."""
     arm1 = StaubliTX260()
     arm1.base = ARM1_BASE
     arm1.q = ARM1_PARK
@@ -265,12 +253,12 @@ def build_scene(env=None, pot_profiles=()) -> Scene:
         arm2.tool = REBOT_TOOL
     arm2.q = np.zeros(arm2.n)
 
-    can = WateringCan(SE3(*CAN_HOLDER_POSITION.t[:2], CAN_HOLDER_TOP + WateringCan.HEIGHT / 2))
+    can = WateringCanDuck(SE3(*CAN_HOLDER_POSITION.t[:2], CAN_HOLDER_TOP + WateringCanDuck.BODY_HEIGHT / 2))
     pots = {p.pot_id: Pot(p, shelf_pose(p)) for p in pot_profiles}
 
     figures = []
     if env is not None:
-        env.add(build_table())        # furniture first, arms mount on top of it
+        env.add(build_table())
         for arm in (arm1, arm2):
             if isinstance(arm, rtb.DHRobot):
                 figure = StickFigure(arm)
@@ -284,14 +272,13 @@ def build_scene(env=None, pot_profiles=()) -> Scene:
         env.add(build_can_holder())
         for shape in can.shapes + [s for pot in pots.values() for s in pot.shapes]:
             env.add(shape)
-        env.add(build_wall())         # last, so the see-through wall draws over the rest
+        env.add(build_wall())
         env.step()
 
     return Scene(env, arm1, arm2, can, pots, figures, static_obstacles())
 
 
 def reach_report(pot_profiles=()):
-    """Straight-line distances from each arm to what it has to reach."""
     shoulder = (ARM1_BASE * SE3(0, 0, D1)).t
     print("Arm 1 (TX2-60, 0.670 m reach from the shoulder to the flange):")
     for p in pot_profiles:
@@ -304,7 +291,7 @@ def reach_report(pot_profiles=()):
 
 def main():
     import swift
-    from Selfcare_sequence import POT_REGISTRY   # imported here to avoid a circular import
+    from Selfcare_sequence import POT_REGISTRY
 
     env = swift.Swift()
     env.launch(realtime=True)
