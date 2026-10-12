@@ -19,7 +19,6 @@ Run this file on its own just to look at the scene:
 
 import sys
 from dataclasses import dataclass
-from math import pi
 from pathlib import Path
 
 for _root in Path(__file__).resolve().parents[1:3]:
@@ -32,6 +31,7 @@ from spatialmath import SE3
 
 from collision import Box, VCylinder
 from models.rebot_b601_dm import ReBotB601DM
+from models.rebot_visual import ReBotVisual
 from models.staubli_tx2_60 import D1, StaubliTX260
 
 try:
@@ -67,7 +67,8 @@ CAN_HOLDER_HEIGHT = 0.10
 CAN_HOLDER_TOP = TABLE_HEIGHT + CAN_HOLDER_HEIGHT
 
 REBOT_TOOL = None
-
+REBOT_URDF_PATH = str(Path(__file__).resolve().parents[1] / "models" / "rebot_description" / "urdf" / "ReBot_Arm_DM.urdf")
+CAN_MESH_PATH = str(Path(__file__).resolve().parents[1] / "models" / "duck_watering_can.stl")
 
 def build_table():
     return geometry.Cuboid(scale=TABLE_SIZE, pose=TABLE_CENTRE, color=[0.75, 0.6, 0.45, 1])
@@ -123,55 +124,55 @@ class Pot:
 
 class WateringCanDuck:
     """Garden Basics 1.6L Yellow Duck Plastic Watering Can (Bunnings,
-    I/N 0929940). No published dimensions -- these are estimated, sized
-    to roughly match the stated 1.6 L capacity. Measure the real can and
-    update when you have it.
+    I/N 0929940), drawn from models/duck_watering_can.stl. Dimensions are
+    measured off the real can and match the mesh.
 
     Frame sits at the base centre of the body, z up. The body's local x
-    points toward the bill (the 'front' of the duck). The handle arcs
-    over the top, its bar running along local x, so the gripper grasps
-    it from directly above with fingers closing along local y."""
+    points toward the spout (the 'front' of the duck). The handle arcs
+    over the top, its bar running along local x, so the gripper comes in
+    level from the side (along local y) and closes one finger over the bar
+    and one under it, through the gap between the bar and the body.
 
-    BODY_RADIUS = 0.065
-    BODY_HEIGHT = 0.14
-    BILL_LENGTH = 0.05
-    BILL_ANGLE = pi / 12
+    The can is very front heavy (the water sits toward the spout), which
+    the simulation does not model -- on the real arm it will try to nose
+    down about the handle."""
 
-    HANDLE_HEIGHT = 0.08
-    HANDLE_SPAN = 0.10
-    HANDLE_BAR_RADIUS = 0.008
+    BODY_LENGTH = 0.200             # along local x
+    BODY_WIDTH = 0.125              # along local y
+    BODY_HEIGHT = 0.160
+    BODY_SIZE = [BODY_LENGTH, BODY_WIDTH, BODY_HEIGHT]
+
+    HANDLE_TOP = 0.230              # top of the handle bar above the base
+    HANDLE_SPAN = 0.140             # along local x, outside of post to outside of post
+    HANDLE_WIDTH = 0.020            # bar width, what the fingers close on
+    HANDLE_BAR_HEIGHT = 0.220       # centre of the bar above the base
+    GRIP_DROP = 0.030               # grip point below the top of the handle
+    SPOUT_REACH = 0.150             # spout tip ahead of the grip point, along local x
+
+    SPOUT_ROOT = [0.100, 0.0, 0.120]    # where the spout leaves the front of the body
+    SPOUT_TIP_HEIGHT = 0.190
+    SPOUT_RADIUS = 0.022
 
     COLOUR = [0.95, 0.80, 0.10, 1]
 
     def __init__(self, pose: SE3):
-        self.body = geometry.Cylinder(radius=self.BODY_RADIUS, length=self.BODY_HEIGHT,
-                                       color=self.COLOUR)
-        self.bill = geometry.Cylinder(radius=0.012, length=self.BILL_LENGTH,
-                                       color=[0.9, 0.5, 0.1, 1])
-        self.handle = geometry.Cylinder(radius=self.HANDLE_BAR_RADIUS, length=self.HANDLE_SPAN,
-                                         color=[0.3, 0.3, 0.3, 1])
+        self.mesh = geometry.Mesh(CAN_MESH_PATH, color=self.COLOUR)
 
-        bill_root = np.array([self.BODY_RADIUS, 0.0, self.BODY_HEIGHT * 0.6])
-        bill_axis = np.array([np.cos(self.BILL_ANGLE), 0.0, np.sin(self.BILL_ANGLE)])
-        self._bill_local = SE3(bill_root + bill_axis * self.BILL_LENGTH / 2) * SE3.Ry(-self.BILL_ANGLE)
-        self.spout_tip_local = bill_root + bill_axis * self.BILL_LENGTH
-        self.bill_root_local = bill_root
-
-        self._handle_local = SE3(0, 0, self.BODY_HEIGHT + self.HANDLE_HEIGHT) * SE3.Ry(pi / 2)
-        self.handle_grip_local = np.array([0.0, 0.0, self.BODY_HEIGHT + self.HANDLE_HEIGHT])
+        self.handle_grip_local = np.array([0.0, 0.0, self.HANDLE_TOP - self.GRIP_DROP])
+        self.handle_bar_local = np.array([0.0, 0.0, self.HANDLE_BAR_HEIGHT])
         self.handle_bar_direction_local = np.array([1.0, 0.0, 0.0])
+        self.bill_root_local = np.array(self.SPOUT_ROOT)
+        self.spout_tip_local = np.array([self.SPOUT_REACH, 0.0, self.SPOUT_TIP_HEIGHT])
 
         self.set_pose(pose)
 
     @property
     def shapes(self):
-        return [self.body, self.bill, self.handle]
+        return [self.mesh]
 
     def set_pose(self, T: SE3):
         self.T = T
-        self.body.T = T.A
-        self.bill.T = (T * self._bill_local).A
-        self.handle.T = (T * self._handle_local).A
+        self.mesh.T = T.A
 
 
 def _segment_pose(p0, p1):
@@ -227,6 +228,7 @@ class Scene:
     env: object
     arm1: StaubliTX260
     arm2: rtb.Robot
+    rebot_visual: ReBotVisual
     can: WateringCanDuck
     pots: dict
     figures: list
@@ -235,7 +237,7 @@ class Scene:
     def refresh(self):
         for f in self.figures:
             f.update()
-
+        self.rebot_visual.update(self.arm2, self.arm2.q)
 
 def shelf_pose(profile) -> SE3:
     x, y = profile.shelf_position
@@ -253,14 +255,18 @@ def build_scene(env=None, pot_profiles=()) -> Scene:
         arm2.tool = REBOT_TOOL
     arm2.q = np.zeros(arm2.n)
 
-    can = WateringCanDuck(SE3(*CAN_HOLDER_POSITION.t[:2], CAN_HOLDER_TOP + WateringCanDuck.BODY_HEIGHT / 2))
+    rebot_visual = ReBotVisual(REBOT_URDF_PATH, dh_tool=arm2.tool, base=arm2.base)
+
+    can = WateringCanDuck(SE3(*CAN_HOLDER_POSITION.t[:2], CAN_HOLDER_TOP))
     pots = {p.pot_id: Pot(p, shelf_pose(p)) for p in pot_profiles}
 
     figures = []
     if env is not None:
         env.add(build_table())
         for arm in (arm1, arm2):
-            if isinstance(arm, rtb.DHRobot):
+            if arm is arm2:
+                rebot_visual.add_to(env)
+            elif isinstance(arm, rtb.DHRobot):
                 figure = StickFigure(arm)
                 figures.append(figure)
                 for shape in figure.shapes:
@@ -275,7 +281,7 @@ def build_scene(env=None, pot_profiles=()) -> Scene:
         env.add(build_wall())
         env.step()
 
-    return Scene(env, arm1, arm2, can, pots, figures, static_obstacles())
+    return Scene(env, arm1, arm2, rebot_visual, can, pots, figures, static_obstacles())
 
 
 def reach_report(pot_profiles=()):

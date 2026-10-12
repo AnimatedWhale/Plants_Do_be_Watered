@@ -47,7 +47,7 @@ import roboticstoolbox as rtb
 from spatialmath import SE3
 
 from swift_scene_setup import ARM1_PARK, PLATFORM_POSITION, PLATFORM_TOP, Pot, WateringCanDuck, build_scene
-from collision import VCylinder, Spheres, capsule, cylinder, first_collision, rebot_body, tx2_60_body
+from collision import Box, VCylinder, Spheres, capsule, cylinder, first_collision, rebot_body, tx2_60_body
 from models.staubli_tx2_60 import FINGER_OFFSET, GRIPPER_LENGTH, StaubliTX260DH
 
 
@@ -105,11 +105,11 @@ GRIP_TICKS = 10
 ARM1_BACKOFF = 0.15
 ARM2_BACKOFF = 0.08
 ARM1_PITCH = np.deg2rad(30)
-ARM2_PITCH = np.deg2rad(30)     # kept for any future side-grasp use; the can is now a top-handle grasp (pitch=90)
+ARM2_GRIP_DEPTH = 0.02          # how far the fingertips reach past the centre of the can's handle bar
 LIFT = 0.04
 SHELF_CLEARANCE = 0.30
 CARRY_LIFT = 0.10
-POUR_ANGLE = np.deg2rad(80)     # pour tilt angle, about the TCP's local y axis (see tilt, below)
+POUR_ANGLE = np.deg2rad(80)     # pour tilt angle, about the can's own y axis (see _plan_pour)
 POUR_RATE_ML_S = 50.0
 MAX_JOINT_STEP = 0.3
 MIN_UPRIGHT_COS = 0.0           # the held can's own 'up' axis must never cross past horizontal
@@ -144,11 +144,7 @@ def horizontal_unit(v):
 def side_grasp(point, approach, pitch=0.0) -> SE3:
     """TCP pose for a grasp: tool z = approach direction, tilted down
     by `pitch` from horizontal; tool x = 'down' square to that; fingers close
-    along tool y. At pitch=90 deg this is a straight-down, top-of-object
-    grasp (used for the watering can's top handle) -- the 'approach'
-    direction then just sets which way the fingers end up closing, so
-    passing the handle's own bar direction makes the fingers close
-    perpendicular to the bar, straddling it correctly."""
+    along tool y, i.e. horizontally."""
     h = horizontal_unit(approach)
     a = np.cos(pitch) * h + np.sin(pitch) * DOWN
     x = np.cos(pitch) * DOWN - np.sin(pitch) * h
@@ -404,12 +400,16 @@ class ShelfCareSequence:
             self._move_joint_q(arm1, ARM1_PARK)
 
         elif state == State.ARM2_GET_CAN:
-            # Top-down grasp of the can's carry handle: approach straight
-            # down (pitch=90 deg), fingers close perpendicular to the
-            # handle bar, straddling it, same way you'd pick up a bucket.
-            grip_point = transform_point(can.T, can.handle_grip_local)
+            # Side grasp of the can's carry handle: come in level, square to
+            # the bar, from arm 2's side of the can. The level grasp is rolled
+            # a quarter turn so the fingers close vertically, one over the bar
+            # and one under it.
+            bar_centre = transform_point(can.T, can.handle_bar_local)
             bar_direction = can.T.R @ can.handle_bar_direction_local
-            self._T_can = side_grasp(grip_point, bar_direction, np.deg2rad(90))
+            across = np.cross([0.0, 0.0, 1.0], bar_direction)
+            if np.dot(across, bar_centre - arm2.base.t) < 0:
+                across = -across
+            self._T_can = side_grasp(bar_centre + ARM2_GRIP_DEPTH * across, across) * SE3.Rz(np.pi / 2)
             self._move_joint(arm2, back(self._T_can, ARM2_BACKOFF))
         elif state == State.ARM2_APPROACH_CAN:
             self._move_line(arm2, self._T_can)
@@ -475,16 +475,18 @@ class ShelfCareSequence:
         keep the first where arm 2 reaches both poses without hitting
         anything and can tilt between them in a straight line.
 
-        The tilt is about the TCP's local Y axis (horizontal, perpendicular
-        to both the approach direction and 'down') -- the same axis you'd
-        rotate a cup about to tip it forward, rather than its own approach
-        axis, which doesn't correspond to any natural pouring motion."""
+        The tilt is about the can's own y axis (level, square to the spout),
+        the way you tip a jug forward. Held by the side of its handle that is
+        a roll about the gripper's approach axis, so the pour is mostly a
+        turn of the wrist."""
         target_xy = PLATFORM_POSITION.t[:2]
 
-        spout_tool = self._T_tool_obj.R @ [1.0, 0.0, 0.0]
-        sign = -np.sign(spout_tool[1])
-        tilt = SE3.Ry(sign * POUR_ANGLE)
         R_can_in_tool = self._T_tool_obj.R
+
+        def tilt_by(angle):
+            return SE3.Rt(R_can_in_tool @ SE3.Ry(angle).R @ R_can_in_tool.T, [0, 0, 0], check=False)
+
+        tilt = tilt_by(POUR_ANGLE)
 
         tip_tool = transform_point(self._T_tool_obj, self.can.spout_tip_local)
         tip_target = np.array([*target_xy, PLATFORM_TOP + self.current_pot.profile.pour_clearance_z])
@@ -492,7 +494,7 @@ class ShelfCareSequence:
         candidates = []
         for heading in np.deg2rad(np.arange(-180, 180, 10)):
             R_carry = SE3.Rz(heading).R @ self._T_can.R
-            if not can_stays_upright(R_carry, R_can_in_tool, SE3.Ry, sign, POUR_ANGLE):
+            if not can_stays_upright(R_carry, R_can_in_tool, tilt_by, 1, POUR_ANGLE):
                 continue
             T_carry = SE3.Rt(R_carry, tip_target - R_carry @ tilt.R @ tip_tool)
             outward = horizontal_unit(T_carry.t - self.arm2.base.t)
@@ -588,9 +590,12 @@ class ShelfCareSequence:
                 obs.append((pot_id, VCylinder(pot_id, pot.T.t, pot.profile.diameter_mm / 2000,
                                               pot.profile.height_mm / 1000)))
         if self.can is not self._held:
-            base = self.can.T.t
-            obs.append(("watering can", VCylinder("watering can", base, WateringCanDuck.BODY_RADIUS,
-                                                   WateringCanDuck.BODY_HEIGHT)))
+            # the can stands square to the desk, so its body and handle are axis-aligned boxes
+            base, can = self.can.T.t, WateringCanDuck
+            handle_height = can.HANDLE_TOP - can.BODY_HEIGHT
+            obs.append(("watering can", Box("watering can", base + [0, 0, can.BODY_HEIGHT / 2], can.BODY_SIZE)))
+            obs.append(("watering can", Box("watering can", base + [0, 0, can.BODY_HEIGHT + handle_height / 2],
+                                            [can.HANDLE_SPAN, can.HANDLE_WIDTH, handle_height])))
         return obs
 
     def _held_spheres(self, arm, q):
@@ -600,12 +605,16 @@ class ShelfCareSequence:
         if isinstance(self._held, Pot):
             p = self._held.profile
             return cylinder(p.pot_id, T, p.diameter_mm / 2000, 0.0, p.height_mm / 1000)
-        body = cylinder("watering can", T, WateringCanDuck.BODY_RADIUS,
-                        0.0, WateringCanDuck.BODY_HEIGHT)
+        # the box body as two columns of spheres side by side along its length
+        can = WateringCanDuck
+        r = can.BODY_WIDTH / 2
+        halves = [cylinder("watering can", T * SE3(side * (can.BODY_LENGTH / 2 - r), 0, 0), r,
+                           0.0, can.BODY_HEIGHT) for side in (1, -1)]
         root = transform_point(T, self.can.bill_root_local)
         spout = capsule("spout", root, transform_point(T, self.can.spout_tip_local), 0.01)
-        return Spheres("watering can", np.vstack([body.centres, spout.centres]),
-                       np.concatenate([body.radii, spout.radii]))
+        parts = halves + [spout]
+        return Spheres("watering can", np.vstack([p.centres for p in parts]),
+                       np.concatenate([p.radii for p in parts]))
 
     # --- gripper ------------------------------------------------------------
 
