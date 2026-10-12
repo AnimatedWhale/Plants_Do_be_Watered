@@ -46,7 +46,8 @@ import numpy as np
 import roboticstoolbox as rtb
 from spatialmath import SE3
 
-from swift_scene_setup import ARM1_PARK, PLATFORM_POSITION, PLATFORM_TOP, Pot, WateringCanDuck, build_scene
+from swift_scene_setup import (ARM1_PARK, PLATFORM_POSITION, PLATFORM_TOP, REBOT_FINGER_OPEN, Pot,
+                               WateringCanDuck, build_scene)
 from collision import Box, VCylinder, Spheres, capsule, cylinder, first_collision, rebot_body, tx2_60_body
 from models.staubli_tx2_60 import FINGER_OFFSET, GRIPPER_LENGTH, StaubliTX260DH
 
@@ -70,7 +71,7 @@ class PotProfile:
 
     @property
     def pour_clearance_z(self) -> float:
-        return (self.height_mm / 1000) + 0.10
+        return (self.height_mm / 1000) + 0.04
 
 
 POT_REGISTRY = {
@@ -110,6 +111,10 @@ LIFT = 0.04
 SHELF_CLEARANCE = 0.30
 CARRY_LIFT = 0.10
 POUR_ANGLE = np.deg2rad(80)     # pour tilt angle, about the can's own y axis (see _plan_pour)
+POUR_STEPS = 60                 # waypoints in the pour tilt
+POUR_RIM_INSET = 0.015          # the spout tip sits this far inside the pot's rim, so the water runs down its side
+POUR_FLOOR_MARGIN = 0.02        # the tilting can's body stays this far above the platform
+POUR_APPROACH_LIFT = 0.10       # the can arrives this far above its pour start, then comes straight down
 POUR_RATE_ML_S = 50.0
 MAX_JOINT_STEP = 0.3
 MIN_UPRIGHT_COS = 0.0           # the held can's own 'up' axis must never cross past horizontal
@@ -290,6 +295,9 @@ class ShelfCareSequence:
         self._T_tool_obj = None
         self._home2 = self.arm2.q.copy()
 
+        self._scene = scene
+        self._finger_goal = REBOT_FINGER_OPEN
+
     # --- safety -------------------------------------------------------
 
     def estop(self):
@@ -324,6 +332,7 @@ class ShelfCareSequence:
     def step(self):
         if self.estop_active or self.state in (State.FAULT, State.DONE):
             return
+        self._move_fingers()
         if self._queue:
             for _ in range(min(self.speed, len(self._queue))):
                 self._play_waypoint()
@@ -418,15 +427,16 @@ class ShelfCareSequence:
         elif state == State.ARM2_LIFT_CAN:
             self._move_line(arm2, up(self._T_can, CARRY_LIFT))
         elif state == State.ARM2_TO_POUR_POSITION:
-            self._T_carry, self._T_pour = self._plan_pour()
-            self._move_joint(arm2, self._T_carry)
+            q_above, self._lower_qs, self._pour_qs = self._plan_pour()
+            self._move_joint_q(arm2, q_above)
+            self._queue.extend((arm2, q) for q in self._lower_qs)
         elif state == State.ARM2_POUR:
             volume = self.current_pot.profile.water_volume_ml
-            self._move_line(arm2, self._T_pour)
+            self._queue.extend((arm2, q) for q in self._pour_qs)
             self._hold += int(volume / POUR_RATE_ML_S / DT)
             self._log(f"pouring {volume:.0f} ml")
         elif state == State.ARM2_UNTILT:
-            self._move_line(arm2, self._T_carry)
+            self._queue.extend((arm2, q) for q in reversed(self._lower_qs + self._pour_qs))
         elif state == State.ARM2_RETURN_CAN:
             self._move_joint(arm2, up(self._T_can, CARRY_LIFT))
             self._move_line(arm2, self._T_can)
@@ -466,53 +476,81 @@ class ShelfCareSequence:
         return pot.profile.height_mm / 1000 + pot.profile.grasp_offset_z
 
     def _plan_pour(self):
-        """Carry pose (can upright) and pour pose (can tilted) for arm 2.
+        """Where arm 2 carries the can to (upright, above the pour start), the
+        straight drop from there to the pour start, and the pour tilt itself.
+        The first is a joint configuration, the other two are joint paths.
+
+        The can pours from off to one side of the pot: its spout tip sits just
+        inside the near rim, a little above it, so the water runs down the
+        inside of the pot. The tip height scales with the pot.
+
+        The tilt is about the can's own y axis (level, square to the spout),
+        the way you tip a jug forward, but it pivots on the spout tip rather
+        than on the gripper: the tip stays over one spot and the rest of the
+        can swings up around it. A short pot's rim is lower than an upright
+        can's spout, so there the tip starts higher and comes straight down
+        onto the pour point as the tilt lifts the can's body clear of the
+        platform, then holds still for the rest of the tilt.
 
         The spout can come at the pot from any side (any heading about the
         vertical). Arm 2 reaches best with its gripper pointing away from its
         own base, so try headings in 10 deg steps, most 'pointing away' first;
         among those, reject any that would tip the can past horizontal, and
-        keep the first where arm 2 reaches both poses without hitting
-        anything and can tilt between them in a straight line.
-
-        The tilt is about the can's own y axis (level, square to the spout),
-        the way you tip a jug forward. Held by the side of its handle that is
-        a roll about the gripper's approach axis, so the pour is mostly a
-        turn of the wrist."""
-        target_xy = PLATFORM_POSITION.t[:2]
+        keep the first where arm 2 reaches the whole tilt without hitting
+        anything."""
+        profile = self.current_pot.profile
+        pot_xy = PLATFORM_POSITION.t[:2]
+        rim_z = PLATFORM_TOP + profile.pour_clearance_z
+        rim_offset = profile.diameter_mm / 2000 - POUR_RIM_INSET
 
         R_can_in_tool = self._T_tool_obj.R
+        tip_tool = transform_point(self._T_tool_obj, self.can.spout_tip_local)
 
         def tilt_by(angle):
             return SE3.Rt(R_can_in_tool @ SE3.Ry(angle).R @ R_can_in_tool.T, [0, 0, 0], check=False)
 
-        tilt = tilt_by(POUR_ANGLE)
+        # corners of the can's body, relative to the spout tip, in the can's frame
+        half_l, half_w = WateringCanDuck.BODY_LENGTH / 2, WateringCanDuck.BODY_WIDTH / 2
+        corners = np.array([[x, y, z] for x in (-half_l, half_l) for y in (-half_w, half_w)
+                            for z in (0.0, WateringCanDuck.BODY_HEIGHT)]) - self.can.spout_tip_local
 
-        tip_tool = transform_point(self._T_tool_obj, self.can.spout_tip_local)
-        tip_target = np.array([*target_xy, PLATFORM_TOP + self.current_pot.profile.pour_clearance_z])
+        def pour_poses(R_carry):
+            spout = horizontal_unit(R_carry @ R_can_in_tool @ [1.0, 0.0, 0.0])
+            tip_xy = pot_xy - rim_offset * spout[:2]
+            poses = []
+            for angle in np.linspace(0.0, POUR_ANGLE, POUR_STEPS):
+                R = R_carry @ tilt_by(angle).R
+                drop = -(corners @ (R @ R_can_in_tool).T)[:, 2].min()   # lowest body corner below the tip
+                tip = np.array([*tip_xy, max(rim_z, PLATFORM_TOP + POUR_FLOOR_MARGIN + drop)])
+                poses.append(SE3.Rt(R, tip - R @ tip_tool, check=False))
+            return poses
 
         candidates = []
         for heading in np.deg2rad(np.arange(-180, 180, 10)):
             R_carry = SE3.Rz(heading).R @ self._T_can.R
             if not can_stays_upright(R_carry, R_can_in_tool, tilt_by, 1, POUR_ANGLE):
                 continue
-            T_carry = SE3.Rt(R_carry, tip_target - R_carry @ tilt.R @ tip_tool)
-            outward = horizontal_unit(T_carry.t - self.arm2.base.t)
-            candidates.append((-np.dot(horizontal_unit(R_carry[:, 2]), outward), T_carry))
+            poses = pour_poses(R_carry)
+            outward = horizontal_unit(poses[0].t - self.arm2.base.t)
+            candidates.append((-np.dot(horizontal_unit(R_carry[:, 2]), outward), poses))
         candidates.sort(key=lambda c: c[0])
 
         last_reason = "every heading would tip the can past horizontal"
-        for _, T_carry in candidates:
+        for _, poses in candidates:
             try:
-                q_carry = solve_ik(self.arm2, T_carry, self._last_q(self.arm2), slimit=50)
-                self._joint_path(self.arm2, q_carry)
-                self._checked_line(self.arm2, q_carry, T_carry * tilt)
+                q_above = solve_ik(self.arm2, up(poses[0], POUR_APPROACH_LIFT), self._last_q(self.arm2), slimit=50)
+                self._joint_path(self.arm2, q_above)
+                lower_qs = self._checked_line(self.arm2, q_above, poses[0])
+                pour_qs = follow_poses(self.arm2, lower_qs[-1], poses)
+                hit = self._first_collision(self.arm2, pour_qs)
+                if hit is not None:
+                    raise PlanningError(f"{self.arm2.name}: pour tilt collides ({hit})")
             except PlanningError as e:
                 last_reason = str(e)
                 continue
-            return T_carry, T_carry * tilt
+            return q_above, lower_qs, pour_qs
         raise PlanningError(f"{self.arm2.name}: no reachable, collision-free, upright pour pose over "
-                            f"{self.current_pot.profile.pot_id} (last problem: {last_reason})")
+                            f"{profile.pot_id} (last problem: {last_reason})")
 
     # --- queueing motion --------------------------------------------------
 
@@ -621,11 +659,21 @@ class ShelfCareSequence:
     def _grasp(self, arm, obj):
         self._T_tool_obj = arm.fkine(arm.q).inv() * obj.T
         self._holder, self._held = arm, obj
+        if arm is self.arm2:
+            self._finger_goal = WateringCanDuck.HANDLE_WIDTH / 2
         self._hold += GRIP_TICKS
 
     def _release(self):
+        if self._holder is self.arm2:
+            self._finger_goal = REBOT_FINGER_OPEN
         self._holder = self._held = None
         self._hold += GRIP_TICKS
+
+    def _move_fingers(self):
+        """Arm 2's fingers close onto / open off the can handle over the grip pause."""
+        step = self.speed * REBOT_FINGER_OPEN / GRIP_TICKS
+        gap = self._finger_goal - self._scene.arm2_finger_opening
+        self._scene.arm2_finger_opening += float(np.clip(gap, -step, step))
 
     def _log(self, msg):
         print(f"[{self.state.name}] {msg}")

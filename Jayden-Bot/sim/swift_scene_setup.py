@@ -54,7 +54,9 @@ SHELF_SIZE = [0.70, 0.20, 0.02]
 SHELF_CENTRE = SE3(0.25, WALL_Y - SHELF_SIZE[1] / 2, SHELF_HEIGHT - SHELF_SIZE[2] / 2)
 
 ARM1_BASE = SE3(0.25, 0.12, TABLE_HEIGHT)
-ARM2_BASE = SE3(1.05, 0.20, TABLE_HEIGHT)
+# Turned to face the platform: the reBot's waist only turns +/-160 deg, and
+# unturned the platform sits in the gap behind it.
+ARM2_BASE = SE3(1.05, 0.20, TABLE_HEIGHT) * SE3.Rz(np.pi)
 
 ARM1_PARK = np.deg2rad([150, 0, 90, 0, 0, 0])
 
@@ -67,6 +69,7 @@ CAN_HOLDER_HEIGHT = 0.10
 CAN_HOLDER_TOP = TABLE_HEIGHT + CAN_HOLDER_HEIGHT
 
 REBOT_TOOL = None
+REBOT_FINGER_OPEN = 0.025       # each finger's travel from centre when the gripper is open (m)
 REBOT_URDF_PATH = str(Path(__file__).resolve().parents[1] / "models" / "rebot_description" / "urdf" / "ReBot_Arm_DM.urdf")
 CAN_MESH_PATH = str(Path(__file__).resolve().parents[1] / "models" / "duck_watering_can.stl")
 
@@ -233,11 +236,12 @@ class Scene:
     pots: dict
     figures: list
     obstacles: list
+    arm2_finger_opening: float = REBOT_FINGER_OPEN
 
     def refresh(self):
         for f in self.figures:
             f.update()
-        self.rebot_visual.update(self.arm2, self.arm2.q)
+        self.rebot_visual.update(self.arm2, self.arm2.q, self.arm2_finger_opening)
 
 def shelf_pose(profile) -> SE3:
     x, y = profile.shelf_position
@@ -256,6 +260,7 @@ def build_scene(env=None, pot_profiles=()) -> Scene:
     arm2.q = np.zeros(arm2.n)
 
     rebot_visual = ReBotVisual(REBOT_URDF_PATH, dh_tool=arm2.tool, base=arm2.base)
+    rebot_visual.update(arm2, arm2.q, REBOT_FINGER_OPEN)
 
     can = WateringCanDuck(SE3(*CAN_HOLDER_POSITION.t[:2], CAN_HOLDER_TOP))
     pots = {p.pot_id: Pot(p, shelf_pose(p)) for p in pot_profiles}
