@@ -178,6 +178,49 @@ class WateringCanDuck:
         self.mesh.T = T.A
 
 
+class DroppedObject:
+    """A loose object someone can drop into the workcell: a red box the arms
+    must not hit. It waits on the floor in front of the desk, out of reach of
+    both arms, until it is dropped. `version` counts every change, so the
+    sequence knows when to re-check the motion it has already planned.
+
+    `position` is where the object ends up and is what collision checking
+    uses from the moment it is dropped; the drawn box falls onto that spot
+    over the next few frames."""
+
+    SIZE = [0.08, 0.08, 0.08]
+    STOWED = [0.70, -0.30, 0.04]
+    DROP_HEIGHT = 0.40      # the drawn box starts this far above where it lands
+    DROP_PER_FRAME = 0.05
+
+    def __init__(self):
+        self.shape = geometry.Cuboid(scale=self.SIZE, pose=SE3(self.STOWED), color=[0.85, 0.1, 0.1, 1])
+        self.position = np.array(self.STOWED)
+        self.placed = False
+        self.version = 0
+        self._still_to_fall = 0.0
+
+    def place(self, position, fall=True):
+        self._set(position, True, self.DROP_HEIGHT if fall else 0.0)
+
+    def stow(self):
+        self._set(self.STOWED, False, 0.0)
+
+    def update(self):
+        if self._still_to_fall > 0:
+            self._still_to_fall = max(0.0, self._still_to_fall - self.DROP_PER_FRAME)
+            self._draw()
+
+    def _set(self, position, placed, still_to_fall):
+        self.position, self.placed = np.asarray(position, float).copy(), placed
+        self._still_to_fall = still_to_fall
+        self._draw()
+        self.version += 1
+
+    def _draw(self):
+        self.shape.T = SE3(self.position + [0, 0, self._still_to_fall]).A
+
+
 def _segment_pose(p0, p1):
     z = (p1 - p0) / np.linalg.norm(p1 - p0)
     ref = [1.0, 0.0, 0.0] if abs(z[0]) < 0.9 else [0.0, 1.0, 0.0]
@@ -236,12 +279,14 @@ class Scene:
     pots: dict
     figures: list
     obstacles: list
+    hazard: DroppedObject
     arm2_finger_opening: float = REBOT_FINGER_OPEN
 
     def refresh(self):
         for f in self.figures:
             f.update()
         self.rebot_visual.update(self.arm2, self.arm2.q, self.arm2_finger_opening)
+        self.hazard.update()
 
 def shelf_pose(profile) -> SE3:
     x, y = profile.shelf_position
@@ -264,6 +309,7 @@ def build_scene(env=None, pot_profiles=()) -> Scene:
 
     can = WateringCanDuck(SE3(*CAN_HOLDER_POSITION.t[:2], CAN_HOLDER_TOP))
     pots = {p.pot_id: Pot(p, shelf_pose(p)) for p in pot_profiles}
+    hazard = DroppedObject()
 
     figures = []
     if env is not None:
@@ -283,10 +329,11 @@ def build_scene(env=None, pot_profiles=()) -> Scene:
         env.add(build_can_holder())
         for shape in can.shapes + [s for pot in pots.values() for s in pot.shapes]:
             env.add(shape)
+        env.add(hazard.shape)
         env.add(build_wall())
         env.step()
 
-    return Scene(env, arm1, arm2, rebot_visual, can, pots, figures, static_obstacles())
+    return Scene(env, arm1, arm2, rebot_visual, can, pots, figures, static_obstacles(), hazard)
 
 
 def reach_report(pot_profiles=()):

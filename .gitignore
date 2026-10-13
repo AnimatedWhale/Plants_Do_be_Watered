@@ -8,6 +8,7 @@ env/
 # Reference repos and third-party code
 reBotArm_control_py/
 reBot-DevArm/
+rebotarm_ros2/
 
 # Editor and OS
 .vscode/
