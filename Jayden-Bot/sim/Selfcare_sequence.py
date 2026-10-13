@@ -105,10 +105,18 @@ CARRY_STEPS = 80
 GRIP_TICKS = 10
 ARM1_BACKOFF = 0.15
 ARM2_BACKOFF = 0.08
-ARM1_PITCH = np.deg2rad(30)
+ARM1_PITCH = np.deg2rad(45)     # grip angled down: keeps the wrist bent (away from its singularity) at the shelf
+ARM1_MIN_GRIP_HEIGHT = 0.05      # m above the pot base, so angled-down fingertips clear the shelf
+ARM1_GRIP_BELOW_RIM = 0.05       # m, grip at most this far under the rim so the wrist clears a tall pot
 ARM2_GRIP_DEPTH = 0.02          # how far the fingertips reach past the centre of the can's handle bar
 LIFT = 0.04
 SHELF_CLEARANCE = 0.30
+PLATFORM_HOVER = 0.12            # m, carried pot comes round this far above the platform, then lowers
+CARRY_DROP = (0.5, 1.0)          # height changes only in the 2nd half of the swing to the platform...
+CARRY_RISE = (0.0, 0.5)          # ...and the 1st half of the swing back, so the pot is high past the shelf
+PLATFORM_APPROACH_OFFSETS = [45, 30, 60, 75, 90, 105, 15, -15, -30, -45, -60, -75, -90, 0]   # deg off head-on, tried in order
+MAX_CARRY_WRIST_ROLL = 250.0     # deg of J4 + J6 turning allowed while carrying a pot to the platform (one smooth roll)
+SHELF_RETREAT = 0.15             # m, how far a lifted pot is pulled back (along the grip axis) before swinging round
 CARRY_LIFT = 0.10
 POUR_ANGLE = np.deg2rad(80)     # pour tilt angle, about the can's own y axis (see _plan_pour)
 POUR_STEPS = 60                 # waypoints in the pour tilt
@@ -182,8 +190,16 @@ def _ik_goal(arm, T_goal: SE3) -> SE3:
 def solve_ik(arm, T_goal: SE3, q0, slimit=100):
     sol = arm.ikine_LM(_ik_goal(arm, T_goal), q0=q0, joint_limits=True, tol=1e-10, slimit=slimit)
     if sol.success and np.abs(arm.fkine(sol.q).A - T_goal.A).max() < 1e-3:
-        return sol.q
+        return _nearest(arm, sol.q, q0)
     raise PlanningError(f"{arm.name}: no IK solution for TCP at {np.round(T_goal.t, 3)}")
+
+
+def _nearest(arm, q, q_ref):
+    """The joint vector for the same pose as q that is nearest q_ref, for arms
+    that have more than one (the TX2-60's wrist can flip, and J1/J4/J6 can go
+    a full turn either way). Without it the IK picks freely and the wrist
+    spins extra half and full turns between poses."""
+    return arm.closest_equivalent(q, q_ref) if hasattr(arm, "closest_equivalent") else q
 
 
 def joint_move(q_from, q_to, steps=JOINT_STEPS):
@@ -194,18 +210,30 @@ def cartesian_move(arm, q_from, T_to: SE3, steps=CART_STEPS):
     return follow_poses(arm, q_from, rtb.ctraj(arm.fkine(q_from), T_to, steps))
 
 
-def arc_move(arm, q_from, T_to: SE3, steps=CARRY_STEPS):
+def arc_move(arm, q_from, T_to: SE3, steps=CARRY_STEPS, height_change=(0.0, 1.0)):
+    """Swing round the arm's base axis. The height only changes during the
+    `height_change` part of the swing (fractions of it), so a carried pot can
+    stay high while it passes the shelf plants and drop only once clear. The
+    tool turns only about the vertical, so a carried pot stays upright: it
+    swings round with the arm, and any extra turn needed to reach T_to's
+    heading is made along with the height change."""
     T_from = arm.fkine(q_from)
     c = arm.base.t
     p0, p1 = T_from.t - c, T_to.t - c
     r0, r1 = np.hypot(*p0[:2]), np.hypot(*p1[:2])
     a0 = atan2(p0[1], p0[0])
     da = (atan2(p1[1], p1[0]) - a0 + np.pi) % (2 * np.pi) - np.pi
+    heading = lambda T: atan2(T.R[1, 2], T.R[0, 2])
+    turn = (heading(T_to) - heading(T_from) + np.pi) % (2 * np.pi) - np.pi
+    h0, h1 = height_change
     poses = []
     for t in np.linspace(0.0, 1.0, steps):
         s = (1 - np.cos(np.pi * t)) / 2
-        a, r, z = a0 + s * da, r0 + s * (r1 - r0), p0[2] + s * (p1[2] - p0[2])
-        R = SE3.Rz(s * da).R @ T_from.R
+        u = np.clip((s - h0) / (h1 - h0), 0.0, 1.0)
+        sz = (1 - np.cos(np.pi * u)) / 2
+        a, r, z = a0 + s * da, r0 + s * (r1 - r0), p0[2] + sz * (p1[2] - p0[2])
+        # follow the swing; any extra turn happens with the height change
+        R = SE3.Rz(s * da + sz * (turn - da)).R @ T_from.R
         poses.append(SE3.Rt(R, c + [r * np.cos(a), r * np.sin(a), z]))
     return follow_poses(arm, q_from, poses)
 
@@ -297,6 +325,7 @@ class ShelfCareSequence:
 
         self._scene = scene
         self._finger_goal = REBOT_FINGER_OPEN
+        self._arm1_finger_goal = FINGER_OFFSET   # TX2-60 fingers: inner face distance from the TCP
 
         self.stop_latched = False               # a protective stop or planning fault, cleared by acknowledge()
         self.waiting = False                    # reset to the start and not yet told to go
@@ -356,6 +385,8 @@ class ShelfCareSequence:
         self._scene.hazard.stow()
         self._hazard_checked = self._scene.hazard.version
         self._finger_goal = self._scene.arm2_finger_opening = REBOT_FINGER_OPEN
+        self._arm1_finger_goal = FINGER_OFFSET
+        self.arm1.set_finger_offset(FINGER_OFFSET)
         self.current_pot = None
         self._checked = set()
         self.estop_active = self.stop_latched = False
@@ -541,12 +572,9 @@ class ShelfCareSequence:
         elif state == State.ARM1_LIFT_FROM_SHELF:
             self._move_line(arm1, up(self._T_shelf, LIFT))
             self._move_line(arm1, back(up(self._T_shelf, LIFT), ARM1_BACKOFF))
-            self._move_line(arm1, back(up(self._T_shelf, SHELF_CLEARANCE), ARM1_BACKOFF))
+            self._move_line(arm1, self._shelf_transit())
         elif state == State.ARM1_TO_PLATFORM:
-            grip = np.array([*PLATFORM_POSITION.t[:2], PLATFORM_TOP + self._grasp_height(self.current_pot)])
-            self._T_platform = side_grasp(grip, grip - arm1.base.t, ARM1_PITCH)
-            self._move_arc(arm1, self._over_platform())
-            self._move_line(arm1, up(self._T_platform, LIFT), CARRY_STEPS)
+            self._carry_to_platform()
         elif state == State.ARM1_LOWER_ONTO_PLATFORM:
             self._move_line(arm1, self._T_platform)
         elif state == State.ARM1_RELEASE:
@@ -601,7 +629,7 @@ class ShelfCareSequence:
         elif state == State.ARM1_RETURN_TO_SHELF:
             above_slot = up(self._T_shelf, LIFT)
             self._move_line(arm1, self._over_platform(), CARRY_STEPS)
-            self._move_arc(arm1, back(up(self._T_shelf, SHELF_CLEARANCE), ARM1_BACKOFF))
+            self._move_arc(arm1, self._shelf_transit(), height_change=CARRY_RISE)
             self._move_line(arm1, back(above_slot, ARM1_BACKOFF))
             self._move_line(arm1, above_slot)
             self._move_line(arm1, self._T_shelf)
@@ -614,13 +642,64 @@ class ShelfCareSequence:
         elif state == State.DONE:
             self._log("sequence complete")
 
+    def _carry_to_platform(self):
+        """Swing the pot round to the platform and lower it, choosing which
+        side arm 1 grips it from there. Coming at the platform head-on
+        (gripper pointing straight out from the arm), the TX2-60's wrist must
+        pass through its singularity on the way down from the shelf, and J4/J6
+        whip round half a turn. The pot is round, so it can just as well be set
+        down gripped from an angle. Try approach angles from head-on outwards
+        and keep the first with no collision and little wrist roll."""
+        arm1 = self.arm1
+        grip = np.array([*PLATFORM_POSITION.t[:2], PLATFORM_TOP + self._grasp_height(self.current_pot)])
+        problem = None
+        for offset in np.deg2rad(PLATFORM_APPROACH_OFFSETS):
+            self._T_platform = side_grasp(grip, SE3.Rz(offset).R @ (grip - arm1.base.t), ARM1_PITCH)
+            try:
+                swing = self._checked_arc(arm1, self._last_q(arm1), self._over_platform(), CARRY_DROP)
+                down = self._checked_line(arm1, swing[-1], up(self._T_platform, LIFT), CARRY_STEPS)
+                # the moves that follow from this side have to be clear too:
+                # setting the pot down, then backing away from it once released
+                set_down = cartesian_move(arm1, down[-1], self._T_platform)
+                pot, carried_pose = self._held, self._held.T
+                pot.set_pose(self._T_platform * self._T_tool_obj)       # where it will have been put down
+                self._held = self._holder = None
+                try:
+                    away = self._checked_line(arm1, set_down[-1], back(self._T_platform, ARM1_BACKOFF))
+                    self._joint_path(arm1, _nearest(arm1, ARM1_PARK, away[-1]), q0=away[-1])
+                finally:
+                    self._held, self._holder = pot, arm1
+                    pot.set_pose(carried_pose)
+            except PlanningError as e:
+                problem = str(e)
+                continue
+            roll = np.rad2deg(np.abs(np.diff(np.array(swing + down)[:, [3, 5]], axis=0)).sum())
+            if roll > MAX_CARRY_WRIST_ROLL:
+                problem = f"wrist would roll {roll:.0f} deg"
+                continue
+            self._enqueue(arm1, swing + down)
+            return
+        raise PlanningError(f"{arm1.name}: no clean way to set the pot on the platform (last problem: {problem})")
+
+    def _shelf_transit(self) -> SE3:
+        """Pot lifted clear of the shelf, then pulled straight back
+        (horizontally) towards arm 1, ready to swing round."""
+        towards_arm = -horizontal_unit(self._T_shelf.R[:, 2])
+        return SE3(SHELF_RETREAT * towards_arm) * up(self._T_shelf, SHELF_CLEARANCE)
+
     def _over_platform(self) -> SE3:
-        transit_z = back(up(self._T_shelf, SHELF_CLEARANCE), ARM1_BACKOFF).t[2]
-        return up(self._T_platform, transit_z - self._T_platform.t[2])
+        """Arm 1's platform grasp pose, hovering PLATFORM_HOVER above it."""
+        return up(self._T_platform, PLATFORM_HOVER)
 
     @staticmethod
     def _grasp_height(pot):
-        return pot.profile.height_mm / 1000 + pot.profile.grasp_offset_z
+        """Grip height above the pot's base. The TX2-60 grips angled down at
+        ARM1_PITCH, so its wrist sits above and behind the fingers: gripping
+        no lower than ARM1_GRIP_BELOW_RIM under the rim keeps the wrist clear
+        of a tall pot's rim, and no lower than ARM1_MIN_GRIP_HEIGHT keeps the
+        fingertips clear of the shelf."""
+        h = pot.profile.height_mm / 1000
+        return max(h + pot.profile.grasp_offset_z, h - ARM1_GRIP_BELOW_RIM, ARM1_MIN_GRIP_HEIGHT)
 
     def _plan_pour(self):
         """Where arm 2 carries the can to (upright, above the pour start), the
@@ -714,6 +793,8 @@ class ShelfCareSequence:
         return self._last_q(arm)
 
     def _move_joint(self, arm, T_goal: SE3):
+        # seeded from a tidy pose so the IK converges, then turned into the
+        # equivalent nearest where the arm actually is (_move_joint_q)
         self._move_joint_q(arm, solve_ik(arm, T_goal, self._seed(arm, T_goal)))
 
     def _enqueue(self, arm, qs, transit_goal=None):
@@ -721,22 +802,26 @@ class ShelfCareSequence:
         self._transit_goal = transit_goal
 
     def _move_joint_q(self, arm, q_goal):
+        q_goal = _nearest(arm, q_goal, self._last_q(arm))
         self._enqueue(arm, self._joint_path(arm, q_goal), transit_goal=q_goal)
 
     def _move_line(self, arm, T_goal: SE3, steps=CART_STEPS):
         qs = self._checked_line(arm, self._last_q(arm), T_goal, steps)
         self._enqueue(arm, qs)
 
-    def _move_arc(self, arm, T_goal: SE3):
-        qs = arc_move(arm, self._last_q(arm), T_goal)
+    def _move_arc(self, arm, T_goal: SE3, height_change=(0.0, 1.0)):
+        self._enqueue(arm, self._checked_arc(arm, self._last_q(arm), T_goal, height_change))
+
+    def _checked_arc(self, arm, q_from, T_goal: SE3, height_change=(0.0, 1.0)):
+        qs = arc_move(arm, q_from, T_goal, height_change=height_change)
         hit = self._first_collision(arm, qs)
         if hit is not None:
             raise PlanningError(f"{arm.name}: carry arc collides ({hit})")
-        self._enqueue(arm, qs)
+        return qs
 
-    def _joint_path(self, arm, q_goal):
-        q0 = self._last_q(arm)
-        home = ARM1_PARK if arm is self.arm1 else self._home2
+    def _joint_path(self, arm, q_goal, q0=None):
+        q0 = self._last_q(arm) if q0 is None else q0
+        home = _nearest(arm, ARM1_PARK if arm is self.arm1 else self._home2, q0)
         tucked_here = np.r_[q0[0], home[1:]]
         tucked_there = np.r_[q_goal[0], home[1:]]
         hit = None
@@ -815,19 +900,28 @@ class ShelfCareSequence:
         self._holder, self._held = arm, obj
         if arm is self.arm2:
             self._finger_goal = WateringCanDuck.HANDLE_WIDTH / 2
+        if arm is self.arm1:
+            self._arm1_finger_goal = obj.profile.diameter_mm / 2000   # close onto the pot wall
         self._hold += GRIP_TICKS
 
     def _release(self):
         if self._holder is self.arm2:
             self._finger_goal = REBOT_FINGER_OPEN
+        if self._holder is self.arm1:
+            self._arm1_finger_goal = FINGER_OFFSET
         self._holder = self._held = None
         self._hold += GRIP_TICKS
 
     def _move_fingers(self):
-        """Arm 2's fingers close onto / open off the can handle over the grip pause."""
+        """Both grippers close onto / open off what they hold over the grip pause."""
         step = self.speed * REBOT_FINGER_OPEN / GRIP_TICKS
         gap = self._finger_goal - self._scene.arm2_finger_opening
         self._scene.arm2_finger_opening += float(np.clip(gap, -step, step))
+        # TX2-60: same pace, from fully open onto the pot over the grip pause
+        step1 = self.speed * FINGER_OFFSET / GRIP_TICKS
+        gap1 = self._arm1_finger_goal - self.arm1.finger_offset
+        if gap1:
+            self.arm1.set_finger_offset(self.arm1.finger_offset + float(np.clip(gap1, -step1, step1)))
 
     def _log(self, msg):
         print(f"[{self.state.name}] {msg}")
