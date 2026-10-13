@@ -76,17 +76,17 @@ except ImportError:
 
 
 TABLE_HEIGHT = 0.75
-TABLE_SIZE = [1.4, 0.7, 0.03]
-TABLE_CENTRE = SE3(0.7, 0.35, TABLE_HEIGHT - TABLE_SIZE[2] / 2)
+TABLE_SIZE = [1.4, 0.9, 0.03]      # 0.9 m deep (y -0.2 .. 0.7) so arm 1 can sit back from the shelf
+TABLE_CENTRE = SE3(0.7, 0.25, TABLE_HEIGHT - TABLE_SIZE[2] / 2)
 
 WALL_Y = 0.75
 WALL_SIZE = [1.4, 0.02, 1.2]
 WALL_CENTRE = SE3(0.7, WALL_Y + WALL_SIZE[1] / 2, TABLE_HEIGHT + WALL_SIZE[2] / 2)
-SHELF_HEIGHT = 1.05
+SHELF_HEIGHT = 0.95                # lowered from 1.05 so arm 1 reaches the plants without being cramped
 SHELF_SIZE = [0.70, 0.20, 0.02]
 SHELF_CENTRE = SE3(0.25, WALL_Y - SHELF_SIZE[1] / 2, SHELF_HEIGHT - SHELF_SIZE[2] / 2)
 
-ARM1_BASE = SE3(0.25, 0.12, TABLE_HEIGHT)
+ARM1_BASE = SE3(0.25, -0.02, TABLE_HEIGHT)   # set back from the shelf (was y = 0.12): more room to move
 # Turned to face the platform: the reBot's waist only turns +/-160 deg, and
 # unturned the platform sits in the gap behind it.
 ARM2_BASE = SE3(1.05, 0.20, TABLE_HEIGHT) * SE3.Rz(np.pi)
