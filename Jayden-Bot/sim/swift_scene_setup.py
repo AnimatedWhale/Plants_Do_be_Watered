@@ -41,6 +41,39 @@ try:
 except ImportError:
     pass
 
+# Two fixes to Swift's page server so mesh models (the reBot URDF meshes, the
+# duck can) load on Windows. Without them the browser shows "Application
+# error: a client-side exception has occurred" and the sim crashes with
+# ValueError: invalid literal for int() ... 'Connected'.
+#  1. The browser asks for a mesh as /retrieve/C:/Users/...; Swift opens
+#     "/C:/Users/...", which doesn't exist on Windows, so every mesh 404s.
+#     Drop the slash in front of the drive letter.
+#  2. It serves one request at a time with a 5-deep queue, and Windows resets
+#     connections that overflow it while ~40 meshes load at once. Serve
+#     requests in parallel with a deeper queue.
+try:
+    import re
+    import socketserver
+    import types
+    from swift import SwiftRoute
+
+    class _ParallelServer(socketserver.ThreadingTCPServer):
+        daemon_threads = True
+        request_queue_size = 128
+
+        def __init__(self, address, handler, *args, **kwargs):
+            class WindowsPathHandler(handler):
+                def send_file_via_real_path(self):
+                    if re.match(r"^/[A-Za-z]:/", self.path):
+                        self.path = self.path[1:]
+                    return super().send_file_via_real_path()
+
+            super().__init__(address, WindowsPathHandler, *args, **kwargs)
+
+    SwiftRoute.socketserver = types.SimpleNamespace(TCPServer=_ParallelServer)
+except ImportError:
+    pass
+
 
 TABLE_HEIGHT = 0.75
 TABLE_SIZE = [1.4, 0.7, 0.03]
