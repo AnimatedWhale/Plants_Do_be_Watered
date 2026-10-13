@@ -938,6 +938,8 @@ def main():
                         help=f"playback speed-up, 1 = real time (default {DEFAULT_SPEED})")
     parser.add_argument("--collision-test", action="store_true",
                         help="drop an object into an arm's path twice and report how the sequence responds")
+    parser.add_argument("--paused", action="store_true",
+                        help="open in the starting state and wait for Resume before moving (Swift only)")
     args = parser.parse_args()
 
     env = None
@@ -962,6 +964,7 @@ def main():
 
     # With the GUI the loop keeps running after the sequence ends, so the
     # buttons (Reset in particular) still work. Close it with Ctrl+C.
+    seq.waiting = args.paused   # hold the starting state until Resume is pressed
     status, shown, reported = add_controls(env, seq), None, False
     while True:
         seq.step()
