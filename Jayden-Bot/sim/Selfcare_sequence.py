@@ -121,7 +121,7 @@ SHELF_CLEARANCE = 0.30
 PLATFORM_HOVER = 0.12            # m, carried pot comes round this far above the platform, then lowers
 CARRY_DROP = (0.35, 1.0)          # height changes only in the 2nd half of the swing to the platform...
 CARRY_RISE = (0.0, 0.5)          # ...and the 1st half of the swing back, so the pot is high past the shelf
-PLATFORM_APPROACH_OFFSETS = [45, 30, 60, 75, 90, 105, 15, -15, -30, -45, -60, -75, -90, 0]   # deg off head-on, tried in order
+PLATFORM_APPROACH_OFFSETS = [0, 15, -15, 30, -30, 45, -45, 60, -60]   # deg off head-on; head-on keeps the wrist untwisted
 MAX_CARRY_WRIST_ROLL = 250.0     # deg of J4 + J6 turning allowed while carrying a pot to the platform (one smooth roll)
 SHELF_RETREAT = 0.15             # m, how far a lifted pot is pulled back (along the grip axis) before swinging round
 CARRY_LIFT = 0.10
@@ -240,13 +240,24 @@ def arc_move(arm, q_from, T_to: SE3, height_change=(0.0, 1.0), speed=TCP_SPEED):
     stay high while it passes the shelf plants and drop only once clear. The
     tool turns only about the vertical, so a carried pot stays upright: it
     swings round with the arm, and any extra turn needed to reach T_to's
-    heading is made along with the height change."""
+    heading is made along with the height change.
+
+    The swing is about the arm's own plane, which for the TX2-60 sits
+    `plane_offset` (its 20 mm D3) to the side of the base axis. Keeping the
+    gripper in that plane the whole way means J4 and J6 can stay at zero and
+    only J5 bends the wrist (up and down), even where it passes straight."""
     T_from = arm.fkine(q_from)
     c = arm.base.t
-    p0, p1 = T_from.t - c, T_to.t - c
-    r0, r1 = np.hypot(*p0[:2]), np.hypot(*p1[:2])
-    a0 = atan2(p0[1], p0[0])
-    da = (atan2(p1[1], p1[0]) - a0 + np.pi) % (2 * np.pi) - np.pi
+    side = getattr(arm, "plane_offset", 0.0)
+    plane = arm.arm_heading if hasattr(arm, "arm_heading") else (lambda p: atan2(p[1] - c[1], p[0] - c[0]))
+
+    def reach(p):   # distance out along the arm's plane
+        return np.sqrt(max(np.hypot(p[0] - c[0], p[1] - c[1]) ** 2 - side ** 2, 0.0))
+
+    a0 = plane(T_from.t)
+    da = (plane(T_to.t) - a0 + np.pi) % (2 * np.pi) - np.pi
+    r0, r1 = reach(T_from.t), reach(T_to.t)
+    z0, z1 = T_from.t[2], T_to.t[2]
     heading = lambda T: atan2(T.R[1, 2], T.R[0, 2])
     turn = (heading(T_to) - heading(T_from) + np.pi) % (2 * np.pi) - np.pi
     h0, h1 = height_change
@@ -257,10 +268,11 @@ def arc_move(arm, q_from, T_to: SE3, height_change=(0.0, 1.0), speed=TCP_SPEED):
             s = (1 - np.cos(np.pi * t)) / 2
             u = np.clip((s - h0) / (h1 - h0), 0.0, 1.0)
             sz = (1 - np.cos(np.pi * u)) / 2
-            a, r, z = a0 + s * da, r0 + s * (r1 - r0), p0[2] + sz * (p1[2] - p0[2])
+            a, r, z = a0 + s * da, r0 + s * (r1 - r0), z0 + sz * (z1 - z0)
             # follow the swing; any extra turn happens with the height change
             R = SE3.Rz(s * da + sz * (turn - da)).R @ T_from.R
-            poses.append(SE3.Rt(R, c + [r * np.cos(a), r * np.sin(a), z]))
+            out, across = np.array([np.cos(a), np.sin(a), 0.0]), np.array([-np.sin(a), np.cos(a), 0.0])
+            poses.append(SE3.Rt(R, c + r * out + side * across + [0.0, 0.0, z - c[2]]))
         return poses
 
     # Time it so the fastest stretch of the swing runs at `speed`
@@ -596,7 +608,7 @@ class ShelfCareSequence:
         elif state == State.ARM1_TO_SHELF:
             pot = self.current_pot
             grip = pot.T.t + [0, 0, self._grasp_height(pot)]
-            self._T_shelf = side_grasp(grip, grip - arm1.base.t, ARM1_PITCH)
+            self._T_shelf = side_grasp(grip, self._arm1_facing(grip), ARM1_PITCH)
             self._move_joint(arm1, back(self._T_shelf, ARM1_BACKOFF))
         elif state == State.ARM1_APPROACH_POT:
             self._move_line(arm1, self._T_shelf)
@@ -675,6 +687,12 @@ class ShelfCareSequence:
         elif state == State.DONE:
             self._log("sequence complete")
 
+    def _arm1_facing(self, point, offset=0.0):
+        """Horizontal direction for arm 1 to grip `point` from: along the arm's
+        own plane (offset = 0), so the wrist needs no sideways twist (J4 = J6 = 0)."""
+        h = self.arm1.arm_heading(point) + offset
+        return np.array([np.cos(h), np.sin(h), 0.0])
+
     def _carry_to_platform(self):
         """Swing the pot round to the platform and lower it, choosing which
         side arm 1 grips it from there. Coming at the platform head-on
@@ -687,7 +705,7 @@ class ShelfCareSequence:
         grip = np.array([*PLATFORM_POSITION.t[:2], PLATFORM_TOP + self._grasp_height(self.current_pot)])
         problem = None
         for offset in np.deg2rad(PLATFORM_APPROACH_OFFSETS):
-            self._T_platform = side_grasp(grip, SE3.Rz(offset).R @ (grip - arm1.base.t), ARM1_PITCH)
+            self._T_platform = side_grasp(grip, self._arm1_facing(grip, offset), ARM1_PITCH)
             try:
                 swing = self._checked_arc(arm1, self._last_q(arm1), self._over_platform(), CARRY_DROP)
                 down = self._checked_line(arm1, swing[-1], up(self._T_platform, LIFT), LOWER_SPEED)

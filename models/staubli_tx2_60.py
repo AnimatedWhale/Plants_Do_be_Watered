@@ -221,6 +221,17 @@ class StaubliTX260(rtb.Robot):
         self.addconfiguration("qr", QR)
         self._fingers = l6.geometry[2:4]
         self.finger_offset = FINGER_OFFSET
+        # With J4 = J6 = 0 the arm moves in one vertical plane, but that plane
+        # sits D3 to the side of the base axis (along the J2 axis), not through it
+        self.plane_offset = D3
+
+    def arm_heading(self, point):
+        """Heading (rad) the arm must face, with J4 = J6 = 0, for its plane
+        to pass through `point`. That's the bearing of the point from the base
+        minus a small correction for the D3 sideways offset."""
+        g = np.asarray(point, float) - self.base.t
+        rho = np.hypot(g[0], g[1])
+        return np.arctan2(g[1], g[0]) - np.arcsin(np.clip(self.plane_offset / rho, -1.0, 1.0))
 
     def set_finger_offset(self, offset):
         """Slide the fingers so each inner face is `offset` from the TCP
