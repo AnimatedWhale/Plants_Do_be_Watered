@@ -25,14 +25,10 @@ desk, wall, shelf, platform, can holder, pots, can and the other arm before
 the arm moves. A joint move that would hit something is rerouted through the
 arm's home pose; if nothing works the sequence faults and says what would hit.
 
-step() is non-blocking: each call plays one tick. Call it from the GUI /
-sim loop, never inside a blocking while loop of its own.
-
 Run from the repo root:
     python Jayden-Bot/sim/Selfcare_sequence.py                # Swift in the browser
     python Jayden-Bot/sim/Selfcare_sequence.py --moisture 10  # force every plant to need water
     python Jayden-Bot/sim/Selfcare_sequence.py --speed 1      # real-time playback (default 4x)
-    python Jayden-Bot/sim/Selfcare_sequence.py --headless     # plan and run every move without a browser
 """
 
 import argparse
