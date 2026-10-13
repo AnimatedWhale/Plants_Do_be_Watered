@@ -99,9 +99,16 @@ POT_REGISTRY = {
 
 DT = 0.05
 DEFAULT_SPEED = 5
-JOINT_STEPS = 60
-CART_STEPS = 30
-CARRY_STEPS = 80
+# Every move is timed from how far it goes, easing in and out, so nothing
+# jumps or crawls. Speeds are real time (before the --speed playback factor).
+TCP_SPEED = 0.20                # m/s, top gripper speed on straight-line and arc moves
+TCP_TURN_SPEED = np.deg2rad(60) # rad/s, top gripper turning speed
+LOWER_SPEED = 0.08              # m/s, bringing a pot down from its hover over the platform
+SET_DOWN_SPEED = 0.04           # m/s, the last few cm onto a surface, and lifting off one
+JOINT_SPEED_FRACTION = 0.2      # free joint moves use at most this share of the TX2-60's rated joint speeds...
+JOINT_MOVE_TCP_SPEED = 0.40     # m/s ...and the gripper still stays under this on them
+REBOT_JOINT_SPEED = 1.0         # rad/s per joint for the reBot, whose model has no rated speeds
+MIN_STEPS = 10
 GRIP_TICKS = 10
 ARM1_BACKOFF = 0.15
 ARM2_BACKOFF = 0.08
@@ -112,7 +119,7 @@ ARM2_GRIP_DEPTH = 0.02          # how far the fingertips reach past the centre o
 LIFT = 0.04
 SHELF_CLEARANCE = 0.30
 PLATFORM_HOVER = 0.12            # m, carried pot comes round this far above the platform, then lowers
-CARRY_DROP = (0.5, 1.0)          # height changes only in the 2nd half of the swing to the platform...
+CARRY_DROP = (0.35, 1.0)          # height changes only in the 2nd half of the swing to the platform...
 CARRY_RISE = (0.0, 0.5)          # ...and the 1st half of the swing back, so the pot is high past the shelf
 PLATFORM_APPROACH_OFFSETS = [45, 30, 60, 75, 90, 105, 15, -15, -30, -45, -60, -75, -90, 0]   # deg off head-on, tried in order
 MAX_CARRY_WRIST_ROLL = 250.0     # deg of J4 + J6 turning allowed while carrying a pot to the platform (one smooth roll)
@@ -202,15 +209,32 @@ def _nearest(arm, q, q_ref):
     return arm.closest_equivalent(q, q_ref) if hasattr(arm, "closest_equivalent") else q
 
 
-def joint_move(q_from, q_to, steps=JOINT_STEPS):
+# rtb's jtraj / ctraj ease in and out; at their fastest they run 1.875x the average speed
+PEAK = 1.875
+
+
+def _ticks(duration):
+    """Waypoints for a smooth move lasting `duration` seconds."""
+    return max(MIN_STEPS, int(np.ceil(duration / DT)) + 1)
+
+
+def joint_move(q_from, q_to, vmax):
+    """Joint-space move timed so no joint goes faster than vmax (rad/s, per joint)."""
+    dq = np.abs(np.asarray(q_to, float) - np.asarray(q_from, float))
+    steps = _ticks(PEAK * float((dq / vmax).max()))
     return list(rtb.jtraj(q_from, q_to, steps).q)
 
 
-def cartesian_move(arm, q_from, T_to: SE3, steps=CART_STEPS):
-    return follow_poses(arm, q_from, rtb.ctraj(arm.fkine(q_from), T_to, steps))
+def cartesian_move(arm, q_from, T_to: SE3, speed=TCP_SPEED):
+    """Straight-line move, timed so the gripper tops out at `speed`."""
+    T_from = arm.fkine(q_from)
+    dist = np.linalg.norm(T_to.t - T_from.t)
+    turn = abs((T_from.inv() * T_to).angvec()[0])
+    steps = _ticks(PEAK * max(dist / speed, turn / TCP_TURN_SPEED))
+    return follow_poses(arm, q_from, rtb.ctraj(T_from, T_to, steps))
 
 
-def arc_move(arm, q_from, T_to: SE3, steps=CARRY_STEPS, height_change=(0.0, 1.0)):
+def arc_move(arm, q_from, T_to: SE3, height_change=(0.0, 1.0), speed=TCP_SPEED):
     """Swing round the arm's base axis. The height only changes during the
     `height_change` part of the swing (fractions of it), so a carried pot can
     stay high while it passes the shelf plants and drop only once clear. The
@@ -226,16 +250,25 @@ def arc_move(arm, q_from, T_to: SE3, steps=CARRY_STEPS, height_change=(0.0, 1.0)
     heading = lambda T: atan2(T.R[1, 2], T.R[0, 2])
     turn = (heading(T_to) - heading(T_from) + np.pi) % (2 * np.pi) - np.pi
     h0, h1 = height_change
-    poses = []
-    for t in np.linspace(0.0, 1.0, steps):
-        s = (1 - np.cos(np.pi * t)) / 2
-        u = np.clip((s - h0) / (h1 - h0), 0.0, 1.0)
-        sz = (1 - np.cos(np.pi * u)) / 2
-        a, r, z = a0 + s * da, r0 + s * (r1 - r0), p0[2] + sz * (p1[2] - p0[2])
-        # follow the swing; any extra turn happens with the height change
-        R = SE3.Rz(s * da + sz * (turn - da)).R @ T_from.R
-        poses.append(SE3.Rt(R, c + [r * np.cos(a), r * np.sin(a), z]))
-    return follow_poses(arm, q_from, poses)
+
+    def path(steps):
+        poses = []
+        for t in np.linspace(0.0, 1.0, steps):
+            s = (1 - np.cos(np.pi * t)) / 2
+            u = np.clip((s - h0) / (h1 - h0), 0.0, 1.0)
+            sz = (1 - np.cos(np.pi * u)) / 2
+            a, r, z = a0 + s * da, r0 + s * (r1 - r0), p0[2] + sz * (p1[2] - p0[2])
+            # follow the swing; any extra turn happens with the height change
+            R = SE3.Rz(s * da + sz * (turn - da)).R @ T_from.R
+            poses.append(SE3.Rt(R, c + [r * np.cos(a), r * np.sin(a), z]))
+        return poses
+
+    # Time it so the fastest stretch of the swing runs at `speed`
+    trial = path(50)
+    move = max(np.linalg.norm(b.t - a.t) for a, b in zip(trial, trial[1:]))
+    spin = max(abs((a.inv() * b).angvec()[0]) for a, b in zip(trial, trial[1:]))
+    steps = max(MIN_STEPS, int(np.ceil(49 * max(move / (speed * DT), spin / (TCP_TURN_SPEED * DT)))) + 1)
+    return follow_poses(arm, q_from, path(steps))
 
 
 def follow_poses(arm, q_from, poses):
@@ -570,13 +603,13 @@ class ShelfCareSequence:
         elif state == State.ARM1_GRASP:
             self._grasp(arm1, self.current_pot)
         elif state == State.ARM1_LIFT_FROM_SHELF:
-            self._move_line(arm1, up(self._T_shelf, LIFT))
+            self._move_line(arm1, up(self._T_shelf, LIFT), SET_DOWN_SPEED)        # ease it off the shelf
             self._move_line(arm1, back(up(self._T_shelf, LIFT), ARM1_BACKOFF))
             self._move_line(arm1, self._shelf_transit())
         elif state == State.ARM1_TO_PLATFORM:
             self._carry_to_platform()
         elif state == State.ARM1_LOWER_ONTO_PLATFORM:
-            self._move_line(arm1, self._T_platform)
+            self._move_line(arm1, self._T_platform, SET_DOWN_SPEED)        # set it down gently
         elif state == State.ARM1_RELEASE:
             self._release()
         elif state == State.ARM1_RETREAT:
@@ -614,7 +647,7 @@ class ShelfCareSequence:
             self._enqueue(arm2, reversed(self._lower_qs + self._pour_qs))
         elif state == State.ARM2_RETURN_CAN:
             self._move_joint(arm2, up(self._T_can, CARRY_LIFT))
-            self._move_line(arm2, self._T_can)
+            self._move_line(arm2, self._T_can, LOWER_SPEED)
         elif state == State.ARM2_RELEASE_CAN:
             self._release()
         elif state == State.ARM2_HOME:
@@ -628,11 +661,11 @@ class ShelfCareSequence:
             self._grasp(arm1, self.current_pot)
         elif state == State.ARM1_RETURN_TO_SHELF:
             above_slot = up(self._T_shelf, LIFT)
-            self._move_line(arm1, self._over_platform(), CARRY_STEPS)
+            self._move_line(arm1, self._over_platform(), LOWER_SPEED)          # ease it off the platform
             self._move_arc(arm1, self._shelf_transit(), height_change=CARRY_RISE)
             self._move_line(arm1, back(above_slot, ARM1_BACKOFF))
             self._move_line(arm1, above_slot)
-            self._move_line(arm1, self._T_shelf)
+            self._move_line(arm1, self._T_shelf, SET_DOWN_SPEED)           # set it down gently
         elif state == State.ARM1_RELEASE_ON_SHELF:
             self._release()
         elif state == State.ARM1_HOME:
@@ -657,10 +690,10 @@ class ShelfCareSequence:
             self._T_platform = side_grasp(grip, SE3.Rz(offset).R @ (grip - arm1.base.t), ARM1_PITCH)
             try:
                 swing = self._checked_arc(arm1, self._last_q(arm1), self._over_platform(), CARRY_DROP)
-                down = self._checked_line(arm1, swing[-1], up(self._T_platform, LIFT), CARRY_STEPS)
+                down = self._checked_line(arm1, swing[-1], up(self._T_platform, LIFT), LOWER_SPEED)
                 # the moves that follow from this side have to be clear too:
                 # setting the pot down, then backing away from it once released
-                set_down = cartesian_move(arm1, down[-1], self._T_platform)
+                set_down = cartesian_move(arm1, down[-1], self._T_platform, SET_DOWN_SPEED)
                 pot, carried_pose = self._held, self._held.T
                 pot.set_pose(self._T_platform * self._T_tool_obj)       # where it will have been put down
                 self._held = self._holder = None
@@ -805,8 +838,8 @@ class ShelfCareSequence:
         q_goal = _nearest(arm, q_goal, self._last_q(arm))
         self._enqueue(arm, self._joint_path(arm, q_goal), transit_goal=q_goal)
 
-    def _move_line(self, arm, T_goal: SE3, steps=CART_STEPS):
-        qs = self._checked_line(arm, self._last_q(arm), T_goal, steps)
+    def _move_line(self, arm, T_goal: SE3, speed=TCP_SPEED):
+        qs = self._checked_line(arm, self._last_q(arm), T_goal, speed)
         self._enqueue(arm, qs)
 
     def _move_arc(self, arm, T_goal: SE3, height_change=(0.0, 1.0)):
@@ -826,14 +859,33 @@ class ShelfCareSequence:
         tucked_there = np.r_[q_goal[0], home[1:]]
         hit = None
         for route in ([q0, q_goal], [q0, home, q_goal], [q0, tucked_here, tucked_there, q_goal]):
-            path = [q for a, b in zip(route, route[1:]) for q in joint_move(a, b)]
+            path = [q for a, b in zip(route, route[1:]) for q in self._timed_joint_move(arm, a, b)]
             hit = self._first_collision(arm, path)
             if hit is None:
                 return path
         raise PlanningError(f"{arm.name}: every route collides ({hit})")
 
-    def _checked_line(self, arm, q_from, T_goal: SE3, steps=CART_STEPS):
-        qs = cartesian_move(arm, q_from, T_goal, steps)
+    def _timed_joint_move(self, arm, q_from, q_to):
+        """Joint move under both the joint speed limit and JOINT_MOVE_TCP_SPEED,
+        so a big swing doesn't fling the gripper round much faster than the
+        straight-line moves either side of it."""
+        qs = joint_move(q_from, q_to, self._joint_speed(arm))
+        if len(qs) > 1:
+            p = arm.fkine(np.array(qs)).t
+            fastest = np.linalg.norm(np.diff(p, axis=0), axis=1).max() / DT
+            if fastest > JOINT_MOVE_TCP_SPEED:
+                steps = int(np.ceil(len(qs) * fastest / JOINT_MOVE_TCP_SPEED))
+                qs = list(rtb.jtraj(q_from, q_to, steps).q)
+        return qs
+
+    def _joint_speed(self, arm):
+        """Top speed per joint (rad/s) for free joint-space moves."""
+        if hasattr(arm, "qd_max"):
+            return JOINT_SPEED_FRACTION * arm.qd_max
+        return np.full(arm.n, REBOT_JOINT_SPEED)
+
+    def _checked_line(self, arm, q_from, T_goal: SE3, speed=TCP_SPEED):
+        qs = cartesian_move(arm, q_from, T_goal, speed)
         hit = self._first_collision(arm, qs)
         if hit is not None:
             raise PlanningError(f"{arm.name}: straight-line move collides ({hit})")
