@@ -6,8 +6,10 @@ panel is laid out in sections under heading labels:
 
   status      mode + state + what to press
   safety      E-STOP, Acknowledge, Resume, Pause/Hold, Reset, speed override
+  moisture    each plant's moisture level: shows the sensor reading, drag it
+              down to its threshold to have that plant watered (again)
   mode        Auto / Manual
-  manual      arm, enable switch, J1-J6 sliders, X/Y/Z jog, gripper, go home
+  manual      arm, enable switch, J1-J6 sliders, gripper, go home
   collision   the red box: where to drop it, drop it, take it away
 
 Controls that don't apply right now (jogging in Auto, Resume while stopped)
@@ -38,11 +40,22 @@ class ControlPanel:
         self._label("------ SAFETY ------")
         self._button("E-STOP", seq.estop)
         self._button("Acknowledge stop", seq.acknowledge)
-        self._button("Resume", seq.resume)
+        self._button("Start / Resume", seq.resume)
         self._button("Pause / Hold", seq.pause)
         self._button("Reset to start", seq.reset)
         self._add(swift.Slider(cb=lambda v: seq.set_override(_number(v)), min=5, max=100, step=5, value=100,
                                desc="Speed override", unit="%"))
+
+        self._label("------ PLANT MOISTURE ------")
+        self.moisture = {}
+        for pot_id, pot in seq.pots.items():
+            name = pot_id.replace("pot_", "").capitalize()
+            self.moisture[pot_id] = self._add(swift.Slider(
+                cb=lambda v, pot_id=pot_id: self._on_moisture(pot_id, v), min=0, max=100, step=1,
+                value=round(seq.moisture[pot_id]), unit="%",
+                desc=f"{name} pot (waters at {pot.profile.moisture_threshold:.0f}% or below)"))
+        self._moisture_shown = {pot_id: float(round(m)) for pot_id, m in seq.moisture.items()}
+        self._moisture_synced = {pot_id: 0 for pot_id in seq.pots}
 
         self._label("------ MODE ------")
         self.mode = self._add(swift.Radio(cb=self._on_mode, desc="Mode",
@@ -58,12 +71,6 @@ class ControlPanel:
                        for j in range(6)]
         self._joint_shown = [0.0] * 6     # what each joint slider shows in the browser
         self._joint_synced = [0] * 6      # tick the panel last moved each joint slider
-        self.jog_step = 0.01
-        self._add(swift.Slider(cb=self._on_step, min=1, max=50, step=1, value=10, desc="Jog step", unit="mm"))
-        for axis, name in enumerate("XYZ"):
-            for sign in (1, -1):
-                self._button(f"{name}{'+' if sign > 0 else '-'}",
-                             lambda axis=axis, sign=sign: seq.jog_cartesian(axis, sign * self.jog_step))
         self._button("Gripper open", lambda: seq.jog_gripper(False))
         self._button("Gripper close", lambda: seq.jog_gripper(True))
         self._button("Go home", seq.jog_home)
@@ -116,8 +123,12 @@ class ControlPanel:
         self._joint_shown[j] = value
         self.seq.jog_joint(j, value)
 
-    def _on_step(self, value):
-        self.jog_step = _number(value) / 1000
+    def _on_moisture(self, pot_id, value):
+        value = _number(value)
+        if abs(value - self._moisture_shown[pot_id]) < 1e-6 or self._tick - self._moisture_synced[pot_id] < ECHO_TICKS:
+            return
+        self._moisture_shown[pot_id] = value
+        self.seq.set_moisture(pot_id, value)
 
     # --- keeping it up to date ----------------------------------------------
 
@@ -135,6 +146,13 @@ class ControlPanel:
 
         self._tick += 1
 
+        # moisture sliders follow the sim (a watered plant jumps to 100%, Reset re-reads them)
+        for pot_id, slider in self.moisture.items():
+            value = float(round(seq.moisture[pot_id]))
+            if self._moisture_shown[pot_id] != value:
+                self._moisture_shown[pot_id] = slider.value = value
+                self._moisture_synced[pot_id] = self._tick
+
         self._set(self.mode, "checked", [not seq.manual, seq.manual])
         if self._shown.get("enable") != seq.jog_enabled:
             # set it directly: swift's Checkbox prints every value given to its setter
@@ -142,7 +160,7 @@ class ControlPanel:
             self.enable._checked, self.enable._changed = [seq.jog_enabled], True
 
         # point the joint sliders at the jogged arm's goal whenever it changes
-        # other than by dragging a slider (new arm, jog refused, X/Y/Z, home...)
+        # other than by dragging a slider (new arm, jog refused, home...)
         if seq.jog_version != self._jog_version:
             self._jog_version = seq.jog_version
             arm = seq.jog_arm

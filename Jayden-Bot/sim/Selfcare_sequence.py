@@ -142,7 +142,6 @@ MIN_UPRIGHT_COS = 0.0           # the held can's own 'up' axis must never cross 
 # manual mode, and manual moves play in real time (no --speed factor).
 MANUAL_JOINT_SPEED_FRACTION = 0.10   # share of the TX2-60's rated joint speeds when jogging
 MANUAL_TCP_SPEED = 0.25              # m/s, cap on the gripper during a manual joint move
-MANUAL_LINE_SPEED = 0.10             # m/s, gripper speed on an X/Y/Z jog
 MANUAL_WORK_REACH = 0.15             # m, the object nearest the gripper within this may be reached into
 GRAB_TOLERANCE = 0.02                # m, how far the TCP may be off an object and still grab it
 ARM1_FINGER_CLOSED = 0.01            # TX2-60 finger offset with nothing in the gripper
@@ -369,7 +368,9 @@ class ShelfCareSequence:
         self._resume_state = None
 
         self.current_pot = None
-        self._checked = set()
+        self.keep_watching = False      # with the GUI: when no plant needs water, wait for one to dry out
+        self.moisture = self._fresh_moisture()
+        self._all_ok_reported = False
 
         self._queue = deque()
         self._hold = 0
@@ -458,7 +459,7 @@ class ShelfCareSequence:
             self._log("nothing is running to pause")
         elif not self.paused:
             self.paused = True
-            self._log("paused - press Resume to carry on")
+            self._log("paused - press Start / Resume to carry on")
 
     def set_override(self, percent):
         self.override = float(np.clip(float(percent) / 100.0, 0.05, 1.0))
@@ -488,7 +489,7 @@ class ShelfCareSequence:
             self.manual = False
             self.jog_enabled = False
             self.reset()
-            self._log("AUTO mode - cell reset to the start, press Resume to run")
+            self._log("AUTO mode - cell reset to the start, press Start / Resume to run")
 
     def reset(self):
         """Put the whole cell back as it was at the start (arms home, plants
@@ -511,7 +512,8 @@ class ShelfCareSequence:
         self._arm1_finger_goal = FINGER_OFFSET
         self.arm1.set_finger_offset(FINGER_OFFSET)
         self.current_pot = None
-        self._checked = set()
+        self.moisture = self._fresh_moisture()
+        self._all_ok_reported = False
         self.estop_active = self.stop_latched = False
         self.fault_reason = ""
         self.state = State.IDLE
@@ -529,15 +531,17 @@ class ShelfCareSequence:
             jog = "jogging" if self._queue else ("enabled" if self.jog_enabled else "tick Enable jog to move")
             return f"MANUAL - {self.jog_arm.name} - {jog}"
         if self.waiting:
-            return "AUTO - READY at the start - press Resume to run"
+            return "AUTO - READY at the start - press Start / Resume to run"
         if self.state == State.DONE:
             return "AUTO - DONE - press Reset to go back to the start"
         if self.paused:
-            return f"AUTO - PAUSED in {self.state.name} - press Resume to carry on"
+            return f"AUTO - PAUSED in {self.state.name} - press Start / Resume to carry on"
+        if self.state == State.CHECK_MOISTURE and self.current_pot is None and self._all_ok_reported:
+            return "AUTO - every plant is moist enough - watching the moisture levels"
         if self.state != State.FAULT:
             return f"AUTO - Running: {self.state.name}"
         if self._resume_state is not None:
-            return f"AUTO - STOPPED, acknowledged - {self.fault_reason} - press Resume to carry on"
+            return f"AUTO - STOPPED, acknowledged - {self.fault_reason} - press Start / Resume to carry on"
         return f"AUTO - STOPPED - {self.fault_reason} - press Reset to start over"
 
     @property
@@ -708,19 +712,6 @@ class ShelfCareSequence:
             return qs
         self._start_jog(plan, f"J{joint + 1} jog")
 
-    def jog_cartesian(self, axis, distance):
-        """X/Y/Z button: move the jogged arm's gripper `distance` metres along
-        a world axis in a straight line, keeping its orientation."""
-        if not self._can_jog():
-            return
-        arm = self.jog_arm
-        move = np.zeros(3)
-        move[axis] = distance
-        T_goal = SE3(move) * arm.fkine(self.jog_goal())
-        if self._start_jog(lambda q_now: self._checked_line(arm, q_now, T_goal, MANUAL_LINE_SPEED),
-                           f"{'+' if distance > 0 else '-'}{'XYZ'[axis]} jog"):
-            self.jog_version += 1
-
     def jog_home(self):
         """Take the jogged arm back to its home (parked) pose, re-routing round
         anything in the way like the automatic moves do."""
@@ -885,7 +876,8 @@ class ShelfCareSequence:
 
     def _next_state(self):
         if self.state == State.CHECK_MOISTURE and self.current_pot is None:
-            return State.DONE
+            # nothing needs water: finish, or (GUI) keep checking until a plant dries out
+            return State.CHECK_MOISTURE if self.keep_watching else State.DONE
         if self.state == State.ARM1_HOME:
             return State.CHECK_MOISTURE
         return _ORDER[_ORDER.index(self.state) + 1]
@@ -902,18 +894,21 @@ class ShelfCareSequence:
         arm1, arm2, can = self.arm1, self.arm2, self.can
 
         if state == State.CHECK_MOISTURE:
+            # the first plant (small, medium, large) at or below its threshold;
+            # a watered plant goes to 100%, so it isn't picked again until its
+            # level is turned back down
             self.current_pot = None
             for pot_id, pot in self.pots.items():
-                if pot_id in self._checked:
-                    continue
-                self._checked.add(pot_id)
-                m = self.force_moisture if self.force_moisture is not None else read_moisture(pot_id)
-                needs = m < pot.profile.moisture_threshold
-                self._log(f"{pot_id}: moisture {m:.1f}% (threshold {pot.profile.moisture_threshold}%)"
-                          + (" -> watering" if needs else ""))
-                if needs:
+                if self.needs_water(pot_id):
                     self.current_pot = pot
+                    self._all_ok_reported = False
+                    self._log(f"{pot_id}: moisture {self.moisture[pot_id]:.0f}% "
+                              f"(waters at {pot.profile.moisture_threshold:.0f}% or below) -> watering")
                     return
+            if not self._all_ok_reported:
+                self._all_ok_reported = True
+                self._log("every plant is moist enough: " + ", ".join(
+                    f"{pot_id} {m:.0f}%" for pot_id, m in self.moisture.items()))
 
         elif state == State.ARM1_TO_SHELF:
             pot = self.current_pot
@@ -966,6 +961,9 @@ class ShelfCareSequence:
             self._hold += int(volume / POUR_RATE_ML_S / DT)
             self._log(f"pouring {volume:.0f} ml")
         elif state == State.ARM2_UNTILT:
+            pot_id = self.current_pot.profile.pot_id
+            self.moisture[pot_id] = 100.0       # watered
+            self._log(f"{pot_id} watered: moisture now 100%")
             self._enqueue(arm2, reversed(self._lower_qs + self._pour_qs))
         elif state == State.ARM2_RETURN_CAN:
             self._move_joint(arm2, up(self._T_can, CARRY_LIFT))
@@ -996,6 +994,24 @@ class ShelfCareSequence:
 
         elif state == State.DONE:
             self._log("sequence complete")
+
+    # --- moisture ------------------------------------------------------------
+
+    def _fresh_moisture(self):
+        """A reading for every plant: the simulated sensor's random value, or
+        --moisture for all of them."""
+        return {pot_id: float(self.force_moisture if self.force_moisture is not None else read_moisture(pot_id))
+                for pot_id in self.pots}
+
+    def needs_water(self, pot_id):
+        return self.moisture[pot_id] <= self.pots[pot_id].profile.moisture_threshold
+
+    def set_moisture(self, pot_id, percent):
+        """Set a plant's moisture by hand (GUI slider). Turning a watered
+        plant back down to its threshold queues it up again."""
+        self.moisture[pot_id] = float(np.clip(percent, 0.0, 100.0))
+        self._log(f"{pot_id} moisture set to {self.moisture[pot_id]:.0f}%"
+                  + (" - needs water" if self.needs_water(pot_id) else ""))
 
     def _arm1_facing(self, point, offset=0.0):
         """Horizontal direction for arm 1 to grip `point` from: along the arm's
@@ -1398,7 +1414,8 @@ def main():
     parser.add_argument("--collision-test", action="store_true",
                         help="drop an object into an arm's path twice and report how the sequence responds")
     parser.add_argument("--paused", action="store_true",
-                        help="open in the starting state and wait for Resume before moving (Swift only)")
+                        help="no longer needed: Swift always opens in the starting state and waits for "
+                             "Start / Resume")
     args = parser.parse_args()
 
     env = None
@@ -1425,7 +1442,8 @@ def main():
     # buttons (Reset in particular) still work. Close it with Ctrl+C.
     from control_panel import ControlPanel
 
-    seq.waiting = args.paused   # hold the starting state until Resume is pressed
+    seq.waiting = True          # nothing moves while the page loads: wait for Start / Resume
+    seq.keep_watching = True    # never 'done': water any plant whose moisture is turned down again
     panel, reported = ControlPanel(env, seq), False
     while True:
         seq.step()
