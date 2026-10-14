@@ -119,9 +119,10 @@ _ACCENT = [0.95, 0.70, 0.10, 1.0]
 _DARK = [0.25, 0.25, 0.28, 1.0]
 
 
-def _y_hub(radius, length, color):
-    """Cylinder lying along the local y axis: the housing of a J2/J3/J5 joint."""
-    return sg.Cylinder(radius=radius, length=length, pose=SE3.Rx(pi / 2), color=color)
+def _y_hub(radius, length, color, y=0.0):
+    """Cylinder lying along the local y axis, centred `y` along it: the
+    housing of a J2/J3/J5 joint."""
+    return sg.Cylinder(radius=radius, length=length, pose=SE3(0, y, 0) * SE3.Rx(pi / 2), color=color)
 
 
 def _z_rod(radius, z0, z1, color):
@@ -201,7 +202,11 @@ class StaubliTX260(rtb.Robot):
             _z_rod(0.05, 0.0, A2, _BODY),             # upper arm
         ])
         l3 = Link(ET.ty(D3) * ET.tz(A2) * ET.Ry(), name="link3", parent=l2, qlim=QLIM[2], geometry=[
-            _y_hub(0.06, 0.13, _ACCENT),
+            # The forearm sits D3 to the side of the upper arm. The elbow housing
+            # is centred on the upper arm (like the shoulder housing below it)
+            # and is long enough to cover the forearm too, so it doesn't stick
+            # out to one side.
+            _y_hub(0.06, 0.13 + 2 * D3, _ACCENT, y=-D3),
             _z_rod(0.042, 0.0, D4 - 0.07, _BODY),     # forearm
         ])
         l4 = Link(ET.Rz(), name="link4", parent=l3, qlim=QLIM[3], geometry=[
