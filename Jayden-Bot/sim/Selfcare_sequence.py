@@ -46,8 +46,9 @@ import numpy as np
 import roboticstoolbox as rtb
 from spatialmath import SE3
 
-from swift_scene_setup import (ARM1_PARK, PLATFORM_POSITION, PLATFORM_TOP, REBOT_FINGER_OPEN, DroppedObject, Pot,
-                               WateringCanDuck, build_scene)
+from swift_scene_setup import (ARM1_PARK, CAN_HOLDER_HEIGHT, CAN_HOLDER_POSITION, CAN_HOLDER_TOP, PLATFORM_POSITION,
+                               PLATFORM_TOP, REBOT_FINGER_OPEN, SHELF_CENTRE, SHELF_HEIGHT, SHELF_SIZE, TABLE_CENTRE,
+                               TABLE_HEIGHT, TABLE_SIZE, DroppedObject, Pot, WateringCanDuck, build_scene)
 from collision import Box, VCylinder, Spheres, capsule, cylinder, first_collision, rebot_body, tx2_60_body
 from models.staubli_tx2_60 import FINGER_OFFSET, GRIPPER_LENGTH, StaubliTX260DH
 
@@ -136,6 +137,16 @@ MIN_UPRIGHT_COS = 0.0           # the held can's own 'up' axis must never cross 
                                  #   (0 = exactly horizontal) at any point during the pour tilt sweep.
                                  #   A deliberate 80 deg pour legitimately dips to ~0.17-0.38; this only
                                  #   catches genuine inversion, never the intended pour itself.
+
+# Manual (teach) mode. ISO 10218-1 caps the TCP at 250 mm/s in reduced-speed
+# manual mode, and manual moves play in real time (no --speed factor).
+MANUAL_JOINT_SPEED_FRACTION = 0.10   # share of the TX2-60's rated joint speeds when jogging
+MANUAL_TCP_SPEED = 0.25              # m/s, cap on the gripper during a manual joint move
+MANUAL_LINE_SPEED = 0.10             # m/s, gripper speed on an X/Y/Z jog
+MANUAL_WORK_REACH = 0.15             # m, the object nearest the gripper within this may be reached into
+GRAB_TOLERANCE = 0.02                # m, how far the TCP may be off an object and still grab it
+ARM1_FINGER_CLOSED = 0.01            # TX2-60 finger offset with nothing in the gripper
+REBOT_FINGER_CLOSED = 0.003          # reBot finger travel with nothing in the gripper
 
 DOWN = np.array([0.0, 0.0, -1.0])
 
@@ -380,37 +391,104 @@ class ShelfCareSequence:
         self._hazard_checked = scene.hazard.version
         self._hazard_xyz = np.array([0.70, 0.35, 1.00])
 
+        self.paused = False                     # Pause/Hold: a normal stop, no acknowledge needed
+        self.override = 1.0                     # speed override, share of the programmed speed
+        self._budget = 0.0                      # waypoints owed to playback (lets the override be fractional)
+        self.manual = False                     # manual (teach) mode instead of the automatic sequence
+        self.jog_arm = self.arm1                # the arm the manual controls move
+        self.jog_enabled = False                # the enable switch: nothing jogs unless it is on
+        self.jog_version = 0                    # bumped whenever the joint sliders should re-read the arm
+
     # --- safety -------------------------------------------------------
 
     def estop(self):
-        if self.estop_active or self.state == State.DONE or self.waiting:
+        """Stop both arms where they are, in any mode. It stays stopped until
+        acknowledged, even if nothing was moving when it was pressed."""
+        if self.estop_active:
             return
         self.estop_active = True
-        if self.state != State.FAULT:
+        if self.manual:
+            self._queue.clear()             # a manual jog is just dropped, not resumed
+        elif self.state not in (State.FAULT, State.DONE) and not self.waiting:
             self._resume_state = self.state
+            self.state = State.FAULT
+        if not self.stop_latched:
             self.fault_reason = "E-STOP pressed"
-        self.state = State.FAULT
         self._log("E-STOP")
 
     def acknowledge(self):
         """The operator has seen the stop and dealt with its cause. Nothing
         moves: this only makes resume() available again."""
-        if self.state == State.FAULT and (self.estop_active or self.stop_latched):
+        if self.estop_active or self.stop_latched:
             self.estop_active = False
             self.stop_latched = False
             self._log("acknowledged")
+        else:
+            self._log("nothing to acknowledge")
 
     def resume(self):
-        """Start after a reset, or carry on with the interrupted task after
-        a stop that has been acknowledged."""
-        if self.waiting:
-            self.waiting = False
-            self._log("started")
-        elif (self.state == State.FAULT and not self.estop_active and not self.stop_latched
-                and self._resume_state is not None):
-            self.state, self._resume_state = self._resume_state, None
+        """Start after a reset, carry on after Pause, or carry on with the
+        interrupted task after a stop that has been acknowledged."""
+        if self.estop_active or self.stop_latched:
+            self._log("still stopped - press Acknowledge first")
+        elif self.manual:
+            self._log("in manual mode - switch to Auto to run the sequence")
+        elif self.paused:
+            self.paused = False
             self._hazard_checked = None     # look again at whatever is still queued before moving
             self._log("resumed")
+        elif self.waiting:
+            self.waiting = False
+            self._log("started")
+        elif self.state == State.FAULT and self._resume_state is not None:
+            self.state, self._resume_state = self._resume_state, None
+            self._hazard_checked = None
+            self._log("resumed")
+        elif self.state == State.FAULT:
+            self._log("cannot carry on from this stop - press Reset to start over")
+
+    def pause(self):
+        """Hold: a normal (not safety) stop. The arm stops at its next
+        waypoint and Resume carries on, no acknowledge needed."""
+        if self.manual:
+            self.jog_enabled = False
+            self._queue.clear()
+            self._log("manual jog stopped")
+        elif self.waiting or self.state in (State.FAULT, State.DONE):
+            self._log("nothing is running to pause")
+        elif not self.paused:
+            self.paused = True
+            self._log("paused - press Resume to carry on")
+
+    def set_override(self, percent):
+        self.override = float(np.clip(float(percent) / 100.0, 0.05, 1.0))
+
+    def set_manual(self, manual):
+        """Switch between Auto and Manual. Manual is only allowed while the
+        sequence is not moving (paused, stopped, at the start or done).
+        Going back to Auto resets the cell, since the arms are no longer
+        where the sequence left them."""
+        if manual == self.manual:
+            return
+        if manual:
+            running = not (self.paused or self.waiting or self.state in (State.FAULT, State.DONE)
+                           or self.estop_active)
+            if running:
+                self._log("press Pause (or E-STOP) before switching to Manual")
+                return
+            self._queue.clear()
+            self._transit_goal = None
+            self._resume_state = None
+            self.paused = False
+            self.manual = True
+            self.jog_enabled = False
+            self.jog_version += 1
+            self._log("MANUAL mode - tick 'Enable jog' to move an arm")
+        else:
+            self.manual = False
+            self.jog_enabled = False
+            self.reset()
+            self._log("AUTO mode - cell reset to the start, press Resume to run")
 
     def reset(self):
         """Put the whole cell back as it was at the start (arms home, plants
@@ -438,20 +516,34 @@ class ShelfCareSequence:
         self.fault_reason = ""
         self.state = State.IDLE
         self.waiting = True
+        self.paused = False
+        self.jog_version += 1
         self._log("reset to the start")
 
     @property
     def status(self):
-        """What the operator should see: the state, why it stopped, what to press."""
-        if self.waiting:
-            return "READY at the start - press Resume to run"
-        if self.state == State.DONE:
-            return "DONE - press Reset to go back to the start"
-        if self.state != State.FAULT:
-            return f"Running: {self.state.name}"
+        """What the operator should see: the mode, the state, why it stopped, what to press."""
         if self.estop_active or self.stop_latched:
-            return f"STOPPED - {self.fault_reason} - press Acknowledge, then Resume (or Reset to start over)"
-        return f"STOPPED, acknowledged - {self.fault_reason} - press Resume to carry on (or Reset to start over)"
+            return f"STOPPED - {self.fault_reason} - press Acknowledge"
+        if self.manual:
+            jog = "jogging" if self._queue else ("enabled" if self.jog_enabled else "tick Enable jog to move")
+            return f"MANUAL - {self.jog_arm.name} - {jog}"
+        if self.waiting:
+            return "AUTO - READY at the start - press Resume to run"
+        if self.state == State.DONE:
+            return "AUTO - DONE - press Reset to go back to the start"
+        if self.paused:
+            return f"AUTO - PAUSED in {self.state.name} - press Resume to carry on"
+        if self.state != State.FAULT:
+            return f"AUTO - Running: {self.state.name}"
+        if self._resume_state is not None:
+            return f"AUTO - STOPPED, acknowledged - {self.fault_reason} - press Resume to carry on"
+        return f"AUTO - STOPPED - {self.fault_reason} - press Reset to start over"
+
+    @property
+    def stopped(self):
+        """True while a latched stop (E-STOP or protective stop) is in force."""
+        return self.estop_active or self.stop_latched
 
     def _fault(self, reason):
         self._log(f"FAULT: {reason}")
@@ -545,20 +637,238 @@ class ShelfCareSequence:
         self._protective_stop(f"upcoming collision ({hit})")
         return False
 
+    # --- manual (teach) mode ------------------------------------------------
+    #
+    # One arm at a time, picked with select_jog_arm(). Every jog is planned
+    # from where the arm is to where it was asked to go, collision-checked
+    # like the automatic moves, and played in real time at reduced speed
+    # (MANUAL_* above). A jog that would hit something does not move at all.
+
+    def select_jog_arm(self, index):
+        arm = (self.arm1, self.arm2)[int(index)]
+        if arm is not self.jog_arm:
+            self._queue.clear()
+            self.jog_arm = arm
+            self.jog_version += 1
+            self._log(f"jogging {arm.name}")
+
+    def set_jog_enabled(self, enabled):
+        self.jog_enabled = bool(enabled)
+        if not self.jog_enabled:
+            self._queue.clear()
+            self.jog_version += 1
+        self._log("jog enabled" if self.jog_enabled else "jog disabled")
+
+    def jog_goal(self):
+        """Where the jogged arm is heading (where it is, once it gets there)."""
+        return self._last_q(self.jog_arm)
+
+    def _can_jog(self):
+        if not self.manual:
+            self._log("switch to Manual mode to jog")
+        elif self.stopped:
+            self._log("still stopped - press Acknowledge first")
+        elif not self.jog_enabled:
+            self._log("tick 'Enable jog' first")
+        else:
+            return True
+        return False
+
+    def _start_jog(self, plan, what):
+        """Replace any jog still playing with a new one, planned from where
+        the arm is right now. plan(q_now) returns the waypoints."""
+        arm = self.jog_arm
+        self._queue.clear()
+        try:
+            qs = plan(arm.q)
+        except PlanningError as e:
+            self._log(f"{what} refused: {e}")
+            self.jog_version += 1           # sliders go back to where the arm is
+            return False
+        self._enqueue(arm, qs)
+        return True
+
+    def jog_joint(self, joint, degrees):
+        """Joint slider: move one joint of the jogged arm to `degrees`."""
+        if not self._can_jog():
+            self.jog_version += 1
+            return
+        arm = self.jog_arm
+        goal = self.jog_goal().copy()
+        target = np.clip(np.deg2rad(float(degrees)), *arm.qlim[:, joint])
+        if abs(goal[joint] - target) < 1e-4:
+            return
+        goal[joint] = target
+
+        def plan(q_now):
+            qs = self._timed_joint_move(arm, q_now, goal)
+            hit = self._first_collision(arm, qs)
+            if hit is not None:
+                raise PlanningError(hit)
+            return qs
+        self._start_jog(plan, f"J{joint + 1} jog")
+
+    def jog_cartesian(self, axis, distance):
+        """X/Y/Z button: move the jogged arm's gripper `distance` metres along
+        a world axis in a straight line, keeping its orientation."""
+        if not self._can_jog():
+            return
+        arm = self.jog_arm
+        move = np.zeros(3)
+        move[axis] = distance
+        T_goal = SE3(move) * arm.fkine(self.jog_goal())
+        if self._start_jog(lambda q_now: self._checked_line(arm, q_now, T_goal, MANUAL_LINE_SPEED),
+                           f"{'+' if distance > 0 else '-'}{'XYZ'[axis]} jog"):
+            self.jog_version += 1
+
+    def jog_home(self):
+        """Take the jogged arm back to its home (parked) pose, re-routing round
+        anything in the way like the automatic moves do."""
+        if not self._can_jog():
+            return
+        arm = self.jog_arm
+        home = ARM1_PARK if arm is self.arm1 else self._home2
+
+        def plan(q_now):
+            return self._joint_path(arm, _nearest(arm, home, q_now), q0=q_now)
+        if self._start_jog(plan, "go home"):
+            self.jog_version += 1
+            self._log(f"{arm.name} going home")
+
+    def jog_gripper(self, close):
+        """Open or close the jogged arm's gripper. Closing on a pot or the
+        can's handle picks it up; opening lets go of what it holds, which
+        then settles onto whatever is under it."""
+        if not self._can_jog():
+            return
+        arm = self.jog_arm
+        if not close:
+            if self._holder is arm:
+                obj = self._held
+                self._holder = self._held = None
+                self._settle(obj)
+                self._log(f"{arm.name} let go")
+            self._set_finger_goal(arm, FINGER_OFFSET if arm is self.arm1 else REBOT_FINGER_OPEN)
+            return
+        if self._holder is arm:
+            return
+        obj, width = self._graspable(arm)
+        if obj is None:
+            self._set_finger_goal(arm, ARM1_FINGER_CLOSED if arm is self.arm1 else REBOT_FINGER_CLOSED)
+            self._log(f"{arm.name} gripper closed (nothing in it)")
+            return
+        if arm is self.arm2 and width > REBOT_FINGER_OPEN:
+            self._log(f"that is wider than the {arm.name} gripper opens")
+            return
+        self._T_tool_obj = arm.fkine(arm.q).inv() * obj.T
+        self._holder, self._held = arm, obj
+        self._set_finger_goal(arm, width)
+        self._log(f"{arm.name} picked up the {self._object_name(obj)}")
+
+    def _set_finger_goal(self, arm, value):
+        if arm is self.arm1:
+            self._arm1_finger_goal = value
+        else:
+            self._finger_goal = value
+
+    def _object_name(self, obj):
+        return obj.profile.pot_id if isinstance(obj, Pot) else "watering can"
+
+    def _graspable(self, arm):
+        """The pot or can the gripper is in position to grab, and how far
+        each finger closes to hold it: a pot when the TCP is inside its wall
+        and between its base and rim, the can when the TCP is at its handle."""
+        tcp = arm.fkine(arm.q).t
+        for pot in self.pots.values():
+            if pot is self._held:
+                continue
+            r, h = pot.profile.diameter_mm / 2000, pot.profile.height_mm / 1000
+            base = pot.T.t
+            if (np.hypot(*(tcp - base)[:2]) <= r + GRAB_TOLERANCE
+                    and base[2] - GRAB_TOLERANCE <= tcp[2] <= base[2] + h + GRAB_TOLERANCE):
+                return pot, r
+        if self.can is not self._held:
+            bar = transform_point(self.can.T, self.can.handle_bar_local)
+            if np.linalg.norm(tcp - bar) <= 0.03 + GRAB_TOLERANCE:
+                return self.can, WateringCanDuck.HANDLE_WIDTH / 2
+        return None, 0.0
+
+    def _object_near_gripper(self, arm, q):
+        """In manual mode the gripper may reach into the pot or can nearest
+        it (to pick it up), as the automatic moves do with their work object."""
+        tcp = arm.fkine(q).t
+        near = [(np.linalg.norm((pot.T.t + [0, 0, pot.profile.height_mm / 2000]) - tcp), pot_id)
+                for pot_id, pot in self.pots.items() if pot is not self._held]
+        if self.can is not self._held:
+            near.append((np.linalg.norm(transform_point(self.can.T, self.can.handle_bar_local) - tcp),
+                         "watering can"))
+        near = [n for n in near if n[0] <= MANUAL_WORK_REACH]
+        return min(near)[1] if near else None
+
+    def _settle(self, obj):
+        """A let-go object drops straight down onto the highest surface
+        under it (shelf, platform, can holder, desk or floor) and stands
+        upright there, keeping its heading."""
+        x, y, z = obj.T.t
+        surfaces = [0.0]
+        for centre, size, top in ((TABLE_CENTRE.t, TABLE_SIZE, TABLE_HEIGHT), (SHELF_CENTRE.t, SHELF_SIZE, SHELF_HEIGHT)):
+            if abs(x - centre[0]) <= size[0] / 2 and abs(y - centre[1]) <= size[1] / 2:
+                surfaces.append(top)
+        if np.hypot(x - PLATFORM_POSITION.t[0], y - PLATFORM_POSITION.t[1]) <= 0.10:
+            surfaces.append(PLATFORM_TOP)
+        if np.hypot(x - CAN_HOLDER_POSITION.t[0], y - CAN_HOLDER_POSITION.t[1]) <= 0.06:
+            surfaces.append(CAN_HOLDER_TOP)
+        top = max(s for s in surfaces if s <= z + 0.01) if any(s <= z + 0.01 for s in surfaces) else z
+        heading = atan2(obj.T.R[1, 0], obj.T.R[0, 0])
+        obj.set_pose(SE3(x, y, top) * SE3.Rz(heading))
+
+    def _manual_step(self):
+        n = self._ticks_now()
+        self._move_fingers(max(n, 1))
+        if not self._queue or not self.jog_enabled:
+            return
+        hazard = self._scene.hazard
+        if self._hazard_checked != hazard.version:
+            self._hazard_checked = hazard.version
+            arm = self._queue[0][0]
+            hit = self._first_collision(arm, [q for _, q in self._queue])
+            if hit is not None:
+                self._queue.clear()
+                self.jog_version += 1
+                self._log(f"jog stopped: upcoming collision ({hit})")
+                return
+        for _ in range(min(n, len(self._queue))):
+            self._play_waypoint()
+
     # --- main tick ----------------------------------------------------
 
+    def _ticks_now(self):
+        """Waypoints to play this tick: the playback speed (real time in
+        manual) times the speed override, carried over between ticks so a
+        fractional override still averages out right."""
+        self._budget += (1 if self.manual else self.speed) * self.override
+        n = int(self._budget)
+        self._budget -= n
+        return n
+
     def step(self):
-        if self.waiting or self.estop_active or self.state in (State.FAULT, State.DONE):
+        if self.estop_active or self.stop_latched:
             return
-        self._move_fingers()
+        if self.manual:
+            self._manual_step()
+            return
+        if self.paused or self.waiting or self.state in (State.FAULT, State.DONE):
+            return
+        n = self._ticks_now()
+        self._move_fingers(n)
         if self._queue:
             if not self._path_still_clear():
                 return
-            for _ in range(min(self.speed, len(self._queue))):
+            for _ in range(min(n, len(self._queue))):
                 self._play_waypoint()
             return
         if self._hold > 0:
-            self._hold = max(0, self._hold - self.speed)
+            self._hold = max(0, self._hold - n)
             return
         if not self._entered:
             self._entered = True
@@ -891,16 +1201,18 @@ class ShelfCareSequence:
         if len(qs) > 1:
             p = arm.fkine(np.array(qs)).t
             fastest = np.linalg.norm(np.diff(p, axis=0), axis=1).max() / DT
-            if fastest > JOINT_MOVE_TCP_SPEED:
-                steps = int(np.ceil(len(qs) * fastest / JOINT_MOVE_TCP_SPEED))
+            cap = MANUAL_TCP_SPEED if self.manual else JOINT_MOVE_TCP_SPEED
+            if fastest > cap:
+                steps = int(np.ceil(len(qs) * fastest / cap))
                 qs = list(rtb.jtraj(q_from, q_to, steps).q)
         return qs
 
     def _joint_speed(self, arm):
         """Top speed per joint (rad/s) for free joint-space moves."""
+        share = MANUAL_JOINT_SPEED_FRACTION / JOINT_SPEED_FRACTION if self.manual else 1.0
         if hasattr(arm, "qd_max"):
-            return JOINT_SPEED_FRACTION * arm.qd_max
-        return np.full(arm.n, REBOT_JOINT_SPEED)
+            return share * JOINT_SPEED_FRACTION * arm.qd_max
+        return np.full(arm.n, share * REBOT_JOINT_SPEED)
 
     def _checked_line(self, arm, q_from, T_goal: SE3, speed=TCP_SPEED):
         qs = cartesian_move(arm, q_from, T_goal, speed)
@@ -915,7 +1227,10 @@ class ShelfCareSequence:
         other = self.arm2 if arm is self.arm1 else self.arm1
         others = self._body(other, self._last_q(other))
         obstacles = self._obstacles()
-        work = self.current_pot.profile.pot_id if arm is self.arm1 and self.current_pot else "watering can"
+        if self.manual:
+            work = self._object_near_gripper(arm, qs[-1]) if len(qs) else None
+        else:
+            work = self.current_pot.profile.pot_id if arm is self.arm1 and self.current_pot else "watering can"
         for q in qs:
             hit = first_collision(self._body(arm, q), others, self._held_spheres(arm, q), obstacles, work)
             if hit is not None:
@@ -982,19 +1297,19 @@ class ShelfCareSequence:
         self._holder = self._held = None
         self._hold += GRIP_TICKS
 
-    def _move_fingers(self):
+    def _move_fingers(self, n):
         """Both grippers close onto / open off what they hold over the grip pause."""
-        step = self.speed * REBOT_FINGER_OPEN / GRIP_TICKS
+        step = n * REBOT_FINGER_OPEN / GRIP_TICKS
         gap = self._finger_goal - self._scene.arm2_finger_opening
         self._scene.arm2_finger_opening += float(np.clip(gap, -step, step))
         # TX2-60: same pace, from fully open onto the pot over the grip pause
-        step1 = self.speed * FINGER_OFFSET / GRIP_TICKS
+        step1 = n * FINGER_OFFSET / GRIP_TICKS
         gap1 = self._arm1_finger_goal - self.arm1.finger_offset
         if gap1:
             self.arm1.set_finger_offset(self.arm1.finger_offset + float(np.clip(gap1, -step1, step1)))
 
     def _log(self, msg):
-        print(f"[{self.state.name}] {msg}")
+        print(f"[{'MANUAL' if self.manual else self.state.name}] {msg}")
 
 
 # ---------------------------------------------------------------------
@@ -1072,26 +1387,6 @@ class CollisionTest:
 # Run it
 # ---------------------------------------------------------------------
 
-def add_controls(env, seq):
-    import swift
-
-    status = swift.Label(desc=seq.status)
-    env.add(status)
-    for text, action in (("E-STOP", seq.estop),
-                         ("Acknowledge stop", seq.acknowledge),
-                         ("Resume", seq.resume),
-                         ("Reset to start", seq.reset),
-                         ("Drop object in path", seq.drop_obstacle_ahead),
-                         ("Drop object at sliders", seq.place_obstacle),
-                         ("Remove object", seq.remove_obstacle)):
-        env.add(swift.Button(desc=text, cb=lambda *_, action=action: action()))
-    # the sliders only aim the object; it enters the cell when a Drop button is pressed
-    for axis, (low, high, start) in enumerate(((0.0, 1.4, 0.70), (0.0, 0.7, 0.35), (0.75, 1.5, 1.00))):
-        env.add(swift.Slider(cb=lambda value, axis=axis: seq.aim_obstacle(axis, value),
-                             min=low, max=high, step=0.01, value=start, desc=f"Object {'xyz'[axis]}", unit="m"))
-    return status
-
-
 def main():
     parser = argparse.ArgumentParser(description="ShelfCare watering sequence")
     parser.add_argument("--headless", action="store_true",
@@ -1128,14 +1423,15 @@ def main():
 
     # With the GUI the loop keeps running after the sequence ends, so the
     # buttons (Reset in particular) still work. Close it with Ctrl+C.
+    from control_panel import ControlPanel
+
     seq.waiting = args.paused   # hold the starting state until Resume is pressed
-    status, shown, reported = add_controls(env, seq), None, False
+    panel, reported = ControlPanel(env, seq), False
     while True:
         seq.step()
         if test is not None:
             test.tick()
-        if seq.status != shown:
-            shown = status.desc = seq.status
+        panel.update()
         if seq.state == State.DONE and not reported:
             report(seq, test)
         reported = seq.state == State.DONE
