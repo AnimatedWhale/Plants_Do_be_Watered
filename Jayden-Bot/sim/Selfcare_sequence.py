@@ -24,7 +24,7 @@ import numpy as np
 import roboticstoolbox as rtb
 from spatialmath import SE3
 
-from swift_scene_setup import (ARM1_PARK, CAN_HOLDER_HEIGHT, CAN_HOLDER_POSITION, CAN_HOLDER_TOP, PLATFORM_POSITION,
+from swift_scene_setup import (ARM1_PARK, CAN_HOLDER_POSITION, CAN_HOLDER_TOP, PLATFORM_POSITION,
                                PLATFORM_TOP, REBOT_FINGER_OPEN, SHELF_CENTRE, SHELF_HEIGHT, SHELF_SIZE, TABLE_CENTRE,
                                TABLE_HEIGHT, TABLE_SIZE, DroppedObject, Pot, WateringCanDuck, build_scene)
 from collision import Box, VCylinder, Spheres, capsule, cylinder, first_collision, rebot_body, tx2_60_body
@@ -433,10 +433,10 @@ class ShelfCareSequence:
 
     @property
     def signal(self):
-        """Which signal tower lamp is lit."""
-        if self.state == State.FAULT:
+        """Which signal tower lamp is lit: red stopped, amber paused / manual / idle, green running."""
+        if self.stopped or self.state == State.FAULT:
             return "red"
-        if self.zone_breached or self.waiting or self.state == State.DONE:
+        if self.zone_breached or self.paused or self.manual or self.waiting or self.state == State.DONE:
             return "amber"
         return "green"
 
@@ -1457,7 +1457,7 @@ def main():
     from control_panel import ControlPanel
 
     seq.waiting = True          # nothing moves while the page loads: wait for Start / Resume
-    seq.keep_watching = True    # never 'done': water any plant whose moisture is turned down again
+    seq.keep_watching = test is None    # never 'done' (water any plant turned down again), except in the test
     panel, reported = ControlPanel(env, seq), False
     while True:
         seq.step()
