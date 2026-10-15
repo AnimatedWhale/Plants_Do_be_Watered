@@ -6,10 +6,11 @@ from spatialmath import SE3
 phi = np.arctan2(0.054, 0.2426)
 a3 = np.hypot(0.2426, 0.054)
 
-"""gripper tool frame. The last DH frame already sits at the fingertips with its z axis along joint 6, which is the direction the fingers point (checked against the URDF gripper meshes: they span z = -0.107..0 in that frame, and the fingers slide along its x axis). The tool only turns the frame so the fingers close along tool y, which is what the grasp planning assumes (tool z = approach, tool y = finger closing)."""
+# The DH chain already ends at the fingertips, pointing along the fingers.
+# The tool only turns the frame so the fingers close along tool y.
 _TOOL_ROTATION = SE3.Rz(pi / 2)
 
-GRIPPER_LENGTH = 0.0    # extra reach past the fingertips; the DH chain already ends there
+GRIPPER_LENGTH = 0.0    # no extra length needed
 TOOL = _TOOL_ROTATION * SE3(0, 0, GRIPPER_LENGTH)
 
 class ReBotB601DM(rtb.DHRobot):
