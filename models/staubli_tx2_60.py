@@ -119,9 +119,10 @@ _ACCENT = [0.95, 0.70, 0.10, 1.0]
 _DARK = [0.25, 0.25, 0.28, 1.0]
 
 
-def _y_hub(radius, length, color):
-    """Cylinder lying along the local y axis: the housing of a J2/J3/J5 joint."""
-    return sg.Cylinder(radius=radius, length=length, pose=SE3.Rx(pi / 2), color=color)
+def _y_hub(radius, length, color, y=0.0):
+    """Cylinder lying along the local y axis, centred `y` along it: the
+    housing of a J2/J3/J5 joint."""
+    return sg.Cylinder(radius=radius, length=length, pose=SE3(0, y, 0) * SE3.Rx(pi / 2), color=color)
 
 
 def _z_rod(radius, z0, z1, color):
@@ -129,16 +130,61 @@ def _z_rod(radius, z0, z1, color):
     return sg.Cylinder(radius=radius, length=z1 - z0, pose=SE3(0, 0, (z0 + z1) / 2), color=color)
 
 
+FINGER_THICKNESS = 0.012
+
+
+def _finger_pose(offset, side, length=GRIPPER_LENGTH) -> SE3:
+    """Finger `side` (+1 / -1) with its inner face `offset` from the TCP along tool y."""
+    finger = length - 0.01
+    return SE3(0, side * (offset + FINGER_THICKNESS / 2), 0.03 + finger / 2)
+
+
 def _gripper_geometry(length=GRIPPER_LENGTH):
-    """Flange, palm and two fingers. Fingers close along the tool y axis and
-    their mid-point sits at the TCP (`length` out from the flange)."""
+    """Flange, palm and two fingers. Fingers slide along the palm (tool y)
+    and their mid-point sits at the TCP (`length` out from the flange)."""
     finger = length - 0.01
     return [
         _z_rod(0.032, -0.01, 0.01, _DARK),
-        sg.Cuboid(scale=[0.05, 2 * FINGER_OFFSET + 0.02, 0.03], pose=SE3(0, 0, 0.015), color=_DARK),
-        sg.Cuboid(scale=[0.03, 0.012, finger], pose=SE3(0, FINGER_OFFSET, 0.03 + finger / 2), color=_DARK),
-        sg.Cuboid(scale=[0.03, 0.012, finger], pose=SE3(0, -FINGER_OFFSET, 0.03 + finger / 2), color=_DARK),
+        sg.Cuboid(scale=[0.05, 2 * FINGER_OFFSET + 0.04, 0.03], pose=SE3(0, 0, 0.015), color=_DARK),
+        sg.Cuboid(scale=[0.03, FINGER_THICKNESS, finger], pose=_finger_pose(FINGER_OFFSET, 1), color=_DARK),
+        sg.Cuboid(scale=[0.03, FINGER_THICKNESS, finger], pose=_finger_pose(FINGER_OFFSET, -1), color=_DARK),
     ]
+
+
+def closest_equivalent(q, q_ref):
+    """Of all the joint vectors that put the TX2-60 in exactly the same pose
+    as q, the one nearest q_ref. The spherical wrist can flip, since
+    (J4 + 180, -J5, J6 + 180) is the same pose, and J1, J4 and J6 can each be
+    a full turn either way while staying inside their limits. Picking the
+    nearest stops the wrist spinning extra turns between poses."""
+    q, q_ref = np.asarray(q, float), np.asarray(q_ref, float)
+    flipped = q.copy()
+    flipped[3] += pi
+    flipped[4] = -q[4]
+    flipped[5] += pi
+    if abs(q[4]) < 1e-9:
+        # Wrist straight: J4 and J6 then turn about the same axis and only
+        # their sum matters, so leave J4 where it is and let J6 take the rest.
+        c = q.copy()
+        c[3] = np.clip(q_ref[3], QLIM[3, 0], QLIM[3, 1])
+        c[5] = q[3] + q[5] - c[3]
+        if QLIM[5, 0] <= c[5] <= QLIM[5, 1]:
+            q = c
+    best, best_cost = q, np.inf
+    for cand in (q, flipped):
+        c = cand.copy()
+        ok = QLIM[4, 0] <= c[4] <= QLIM[4, 1]
+        for j in (0, 3, 5):
+            options = c[j] + 2 * pi * np.arange(-2, 3)
+            options = options[(options >= QLIM[j, 0]) & (options <= QLIM[j, 1])]
+            if len(options) == 0:
+                ok = False
+                break
+            c[j] = options[np.argmin(np.abs(options - q_ref[j]))]
+        cost = np.abs(c - q_ref).sum()
+        if ok and cost < best_cost:
+            best, best_cost = c, cost
+    return best
 
 
 class StaubliTX260(rtb.Robot):
@@ -156,7 +202,11 @@ class StaubliTX260(rtb.Robot):
             _z_rod(0.05, 0.0, A2, _BODY),             # upper arm
         ])
         l3 = Link(ET.ty(D3) * ET.tz(A2) * ET.Ry(), name="link3", parent=l2, qlim=QLIM[2], geometry=[
-            _y_hub(0.06, 0.13, _ACCENT),
+            # The forearm sits D3 to the side of the upper arm. The elbow housing
+            # is centred on the upper arm (like the shoulder housing below it)
+            # and is long enough to cover the forearm too, so it doesn't stick
+            # out to one side.
+            _y_hub(0.06, 0.13 + 2 * D3, _ACCENT, y=-D3),
             _z_rod(0.042, 0.0, D4 - 0.07, _BODY),     # forearm
         ])
         l4 = Link(ET.Rz(), name="link4", parent=l3, qlim=QLIM[3], geometry=[
@@ -174,6 +224,29 @@ class StaubliTX260(rtb.Robot):
         self.qz, self.qr = QZ, QR   # rtb.Robot's addconfiguration doesn't set these attributes
         self.addconfiguration("qz", QZ)
         self.addconfiguration("qr", QR)
+        self._fingers = l6.geometry[2:4]
+        self.finger_offset = FINGER_OFFSET
+        # With J4 = J6 = 0 the arm moves in one vertical plane, but that plane
+        # sits D3 to the side of the base axis (along the J2 axis), not through it
+        self.plane_offset = D3
+
+    def arm_heading(self, point):
+        """Heading (rad) the arm must face, with J4 = J6 = 0, for its plane
+        to pass through `point`. That's the bearing of the point from the base
+        minus a small correction for the D3 sideways offset."""
+        g = np.asarray(point, float) - self.base.t
+        rho = np.hypot(g[0], g[1])
+        return np.arctan2(g[1], g[0]) - np.arcsin(np.clip(self.plane_offset / rho, -1.0, 1.0))
+
+    def set_finger_offset(self, offset):
+        """Slide the fingers so each inner face is `offset` from the TCP
+        (FINGER_OFFSET = fully open)."""
+        self.finger_offset = float(offset)
+        for shape, side in zip(self._fingers, (1, -1)):
+            shape.T = _finger_pose(self.finger_offset, side).A
+
+    def closest_equivalent(self, q, q_ref):
+        return closest_equivalent(q, q_ref)
 
 
 # ---------------------------------------------------------------------
@@ -201,3 +274,11 @@ if __name__ == "__main__":
     worst = check_models()
     print(f"DH vs MDH vs Swift model, worst FK difference: {worst:.2e}",
           "OK" if worst < 1e-9 else "MISMATCH")
+
+    # every equivalent closest_equivalent picks must be exactly the same pose
+    rng = np.random.default_rng(1)
+    eq_worst = 0.0
+    for _ in range(500):
+        q, q_ref = rng.uniform(QLIM[:, 0], QLIM[:, 1], size=(2, 6))
+        eq_worst = max(eq_worst, np.abs(dh.fkine(closest_equivalent(q, q_ref)).A - dh.fkine(q).A).max())
+    print(f"closest_equivalent, worst pose change: {eq_worst:.2e}", "OK" if eq_worst < 1e-9 else "MISMATCH")

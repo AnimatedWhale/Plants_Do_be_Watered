@@ -41,20 +41,54 @@ try:
 except ImportError:
     pass
 
+# Two fixes to Swift's page server so mesh models (the reBot URDF meshes, the
+# duck can) load on Windows. Without them the browser shows "Application
+# error: a client-side exception has occurred" and the sim crashes with
+# ValueError: invalid literal for int() ... 'Connected'.
+#  1. The browser asks for a mesh as /retrieve/C:/Users/...; Swift opens
+#     "/C:/Users/...", which doesn't exist on Windows, so every mesh 404s.
+#     Drop the slash in front of the drive letter.
+#  2. It serves one request at a time with a 5-deep queue, and Windows resets
+#     connections that overflow it while ~40 meshes load at once. Serve
+#     requests in parallel with a deeper queue.
+try:
+    import re
+    import socketserver
+    import types
+    from swift import SwiftRoute
+
+    class _ParallelServer(socketserver.ThreadingTCPServer):
+        daemon_threads = True
+        request_queue_size = 128
+
+        def __init__(self, address, handler, *args, **kwargs):
+            class WindowsPathHandler(handler):
+                def send_file_via_real_path(self):
+                    if re.match(r"^/[A-Za-z]:/", self.path):
+                        self.path = self.path[1:]
+                    return super().send_file_via_real_path()
+
+            super().__init__(address, WindowsPathHandler, *args, **kwargs)
+
+    SwiftRoute.socketserver = types.SimpleNamespace(TCPServer=_ParallelServer)
+except ImportError:
+    pass
+
 
 TABLE_HEIGHT = 0.75
-TABLE_SIZE = [1.4, 0.7, 0.03]
-TABLE_CENTRE = SE3(0.7, 0.35, TABLE_HEIGHT - TABLE_SIZE[2] / 2)
+TABLE_SIZE = [1.4, 0.9, 0.03]      # 0.9 m deep (y -0.2 .. 0.7) so arm 1 can sit back from the shelf
+TABLE_CENTRE = SE3(0.7, 0.25, TABLE_HEIGHT - TABLE_SIZE[2] / 2)
 
 WALL_Y = 0.75
 WALL_SIZE = [1.4, 0.02, 1.2]
 WALL_CENTRE = SE3(0.7, WALL_Y + WALL_SIZE[1] / 2, TABLE_HEIGHT + WALL_SIZE[2] / 2)
-SHELF_HEIGHT = 1.05
+SHELF_HEIGHT = 0.95                # lowered from 1.05 so arm 1 reaches the plants without being cramped
 SHELF_SIZE = [0.70, 0.20, 0.02]
 SHELF_CENTRE = SE3(0.25, WALL_Y - SHELF_SIZE[1] / 2, SHELF_HEIGHT - SHELF_SIZE[2] / 2)
 
-ARM1_BASE = SE3(0.25, 0.12, TABLE_HEIGHT)
-# turned 180 deg to face the platform (the waist only turns +/-160 deg)
+ARM1_BASE = SE3(0.25, -0.02, TABLE_HEIGHT)   # set back from the shelf (was y = 0.12): more room to move
+# Turned to face the platform: the reBot's waist only turns +/-160 deg, and
+# unturned the platform sits in the gap behind it.
 ARM2_BASE = SE3(1.05, 0.20, TABLE_HEIGHT) * SE3.Rz(np.pi)
 
 ARM1_PARK = np.deg2rad([150, 0, 90, 0, 0, 0])
