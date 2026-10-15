@@ -102,7 +102,7 @@ CAN_HOLDER_HEIGHT = 0.10
 CAN_HOLDER_TOP = TABLE_HEIGHT + CAN_HOLDER_HEIGHT
 
 REBOT_TOOL = None
-REBOT_FINGER_OPEN = 0.025       # each finger's travel from centre when the gripper is open (m)
+REBOT_FINGER_OPEN = 0.016       # each finger's travel from centre when open (m); fits the gap under the can handle
 REBOT_URDF_PATH = str(Path(__file__).resolve().parents[1] / "models" / "rebot_description" / "urdf" / "ReBot_Arm_DM.urdf")
 CAN_MESH_PATH = str(Path(__file__).resolve().parents[1] / "models" / "duck_watering_can.stl")
 
@@ -174,32 +174,34 @@ class WateringCanDuck:
     Frame: bottom centre of the body, z up, x toward the spout. The handle
     bar runs along x. The real can is front heavy; the sim ignores that."""
 
-    BODY_LENGTH = 0.200             # along local x
-    BODY_WIDTH = 0.125              # along local y
-    BODY_HEIGHT = 0.160
+    # The STL is in mm with its origin off to one side; this puts it in metres on the can frame.
+    MESH_SCALE = 0.001
+    MESH_OFFSET = SE3(0.0, 0.0625, 0.050)
+
+    BODY_LENGTH = 0.200             # along local x, not counting the bill
+    BODY_WIDTH = 0.110              # along local y
+    BODY_HEIGHT = 0.160             # up to the top of the head
     BODY_SIZE = [BODY_LENGTH, BODY_WIDTH, BODY_HEIGHT]
 
-    HANDLE_TOP = 0.230              # top of the handle bar above the base
-    HANDLE_SPAN = 0.140             # along local x
-    HANDLE_WIDTH = 0.020            # bar width
-    HANDLE_BAR_HEIGHT = 0.220       # centre of the bar above the base
-    GRIP_DROP = 0.030               # grip point below the top of the handle
-    SPOUT_REACH = 0.150             # spout tip ahead of the grip point, along local x
+    HANDLE_TOP = 0.150              # top of the handle bar above the base
+    HANDLE_WIDTH = 0.020            # bar thickness, what the fingers close on
+    HANDLE_BAR_HEIGHT = 0.140       # centre of the bar above the base
+    GRIP_X = -0.055                 # where along the bar the gripper holds it (biggest gap under the bar)
+    GRIP_DROP = 0.030               # measured grip point, below the top of the handle
 
-    SPOUT_ROOT = [0.100, 0.0, 0.120]    # where the spout starts
-    SPOUT_TIP_HEIGHT = 0.190
-    SPOUT_RADIUS = 0.022
+    SPOUT_ROOT = [0.100, 0.0, 0.120]    # where the bill leaves the head
+    SPOUT_TIP = [0.120, 0.0, 0.120]     # end of the bill
 
     COLOUR = [0.95, 0.80, 0.10, 1]
 
     def __init__(self, pose: SE3):
-        self.mesh = geometry.Mesh(CAN_MESH_PATH, color=self.COLOUR)
+        self.mesh = geometry.Mesh(CAN_MESH_PATH, scale=[self.MESH_SCALE] * 3, color=self.COLOUR)
 
-        self.handle_grip_local = np.array([0.0, 0.0, self.HANDLE_TOP - self.GRIP_DROP])
-        self.handle_bar_local = np.array([0.0, 0.0, self.HANDLE_BAR_HEIGHT])
+        self.handle_grip_local = np.array([self.GRIP_X, 0.0, self.HANDLE_TOP - self.GRIP_DROP])
+        self.handle_bar_local = np.array([self.GRIP_X, 0.0, self.HANDLE_BAR_HEIGHT])
         self.handle_bar_direction_local = np.array([1.0, 0.0, 0.0])
         self.bill_root_local = np.array(self.SPOUT_ROOT)
-        self.spout_tip_local = np.array([self.SPOUT_REACH, 0.0, self.SPOUT_TIP_HEIGHT])
+        self.spout_tip_local = np.array(self.SPOUT_TIP)
 
         self.set_pose(pose)
 
@@ -209,7 +211,7 @@ class WateringCanDuck:
 
     def set_pose(self, T: SE3):
         self.T = T
-        self.mesh.T = T.A
+        self.mesh.T = (T * self.MESH_OFFSET).A
 
 
 class DroppedObject:

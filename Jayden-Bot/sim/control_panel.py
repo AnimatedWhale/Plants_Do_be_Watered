@@ -5,7 +5,7 @@ Swift stacks its controls top to bottom in the order they are added, so the
 panel is laid out in sections under heading labels:
 
   status      mode + state + what to press
-  safety      E-STOP, Acknowledge, Resume, Pause/Hold, Reset, speed override
+  safety      E-STOP, Acknowledge, Resume, Pause/Hold, Reset, light curtain, speed override
   moisture    each plant's moisture level: shows the sensor reading, drag it
               down to its threshold to have that plant watered (again)
   mode        Auto / Manual
@@ -43,6 +43,7 @@ class ControlPanel:
         self._button("Start / Resume", seq.resume)
         self._button("Pause / Hold", seq.pause)
         self._button("Reset to start", seq.reset)
+        self.curtain = self._button("Break light curtain", lambda: seq.unsafe_zone(not seq.zone_breached))
         self._add(swift.Slider(cb=lambda v: seq.set_override(_number(v)), min=5, max=100, step=5, value=100,
                                desc="Speed override", unit="%"))
 
@@ -143,6 +144,7 @@ class ControlPanel:
         """Call once per pass of the main loop."""
         seq = self.seq
         self._set(self.status, "desc", seq.status)
+        self._set(self.curtain, "desc", "Clear light curtain" if seq.zone_breached else "Break light curtain")
 
         self._tick += 1
 
