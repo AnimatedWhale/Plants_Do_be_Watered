@@ -1,13 +1,36 @@
 """Mesh is the visual twin of the rebot_b601_dm, mainly used for the swift visuals but does not have an input in the kinematics """
 
+import os
+import xml.etree.ElementTree as ET
+
 import numpy as np
 import roboticstoolbox as rtb
 from spatialmath import SE3
+
+
+def urdf_mesh_colours(urdf_path):
+    """Colour of each visual mesh file, from the URDF's materials."""
+    root = ET.parse(urdf_path).getroot()
+    rgba = {m.get("name"): [float(v) for v in m.find("color").get("rgba").split()]
+            for m in root.findall("material") if m.find("color") is not None}
+    colours = {}
+    for visual in root.iter("visual"):
+        mesh, material = visual.find("geometry/mesh"), visual.find("material")
+        if mesh is not None and material is not None and material.get("name") in rgba:
+            colours[os.path.basename(mesh.get("filename"))] = rgba[material.get("name")]
+    return colours
 
 class ReBotVisual:
     """wrap the URDF reBot for swift rendering uses call update(q) in each tick to update with the current joint values and then updates them here """
     def __init__(self, urdf_path: str, dh_tool: SE3, base: SE3 = None):
         self.robot = rtb.ERobot.URDF(urdf_path)
+        # the toolbox loads every part grey, so paint each one with its URDF material
+        colours = urdf_mesh_colours(urdf_path)
+        for link in self.robot.links:
+            for shape in link.geometry:
+                name = os.path.basename(shape.filename or "")
+                if name in colours:
+                    shape.color = colours[name]
         if base is not None:
             self.robot.base = base
         self._dh_tool = dh_tool
