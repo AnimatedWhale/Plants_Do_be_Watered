@@ -106,6 +106,15 @@ REBOT_FINGER_OPEN = 0.025       # each finger's travel from centre when the grip
 REBOT_URDF_PATH = str(Path(__file__).resolve().parents[1] / "models" / "rebot_description" / "urdf" / "ReBot_Arm_DM.urdf")
 CAN_MESH_PATH = str(Path(__file__).resolve().parents[1] / "models" / "duck_watering_can.stl")
 
+# Safety gear. The guards sit just outside the space the arms sweep through.
+GUARD_X = (-0.40, 1.50)         # left and right side guards
+CURTAIN_Y = -0.15               # light curtain across the open front
+GUARD_HEIGHT = 1.80
+GUARD_BACK_Y = WALL_Y + WALL_SIZE[1]
+HIDDEN = SE3(0, 0, -20)         # where a shape goes when it should not be seen
+YELLOW = [0.95, 0.8, 0.1, 1]
+
+
 def build_table():
     return geometry.Cuboid(scale=TABLE_SIZE, pose=TABLE_CENTRE, color=[0.75, 0.6, 0.45, 1])
 
@@ -159,19 +168,11 @@ class Pot:
 
 
 class WateringCanDuck:
-    """Garden Basics 1.6L Yellow Duck Plastic Watering Can (Bunnings,
-    I/N 0929940), drawn from models/duck_watering_can.stl. Dimensions are
-    measured off the real can and match the mesh.
+    """Duck watering can (Bunnings Garden Basics 1.6 L), drawn from
+    models/duck_watering_can.stl. Sizes are measured off the real can.
 
-    Frame sits at the base centre of the body, z up. The body's local x
-    points toward the spout (the 'front' of the duck). The handle arcs
-    over the top, its bar running along local x, so the gripper comes in
-    level from the side (along local y) and closes one finger over the bar
-    and one under it, through the gap between the bar and the body.
-
-    The can is very front heavy (the water sits toward the spout), which
-    the simulation does not model -- on the real arm it will try to nose
-    down about the handle."""
+    Frame: bottom centre of the body, z up, x toward the spout. The handle
+    bar runs along x. The real can is front heavy; the sim ignores that."""
 
     BODY_LENGTH = 0.200             # along local x
     BODY_WIDTH = 0.125              # along local y
@@ -179,13 +180,13 @@ class WateringCanDuck:
     BODY_SIZE = [BODY_LENGTH, BODY_WIDTH, BODY_HEIGHT]
 
     HANDLE_TOP = 0.230              # top of the handle bar above the base
-    HANDLE_SPAN = 0.140             # along local x, outside of post to outside of post
-    HANDLE_WIDTH = 0.020            # bar width, what the fingers close on
+    HANDLE_SPAN = 0.140             # along local x
+    HANDLE_WIDTH = 0.020            # bar width
     HANDLE_BAR_HEIGHT = 0.220       # centre of the bar above the base
     GRIP_DROP = 0.030               # grip point below the top of the handle
     SPOUT_REACH = 0.150             # spout tip ahead of the grip point, along local x
 
-    SPOUT_ROOT = [0.100, 0.0, 0.120]    # where the spout leaves the front of the body
+    SPOUT_ROOT = [0.100, 0.0, 0.120]    # where the spout starts
     SPOUT_TIP_HEIGHT = 0.190
     SPOUT_RADIUS = 0.022
 
@@ -212,18 +213,12 @@ class WateringCanDuck:
 
 
 class DroppedObject:
-    """A loose object someone can drop into the workcell: a red box the arms
-    must not hit. It waits on the floor in front of the desk, out of reach of
-    both arms, until it is dropped. `version` counts every change, so the
-    sequence knows when to re-check the motion it has already planned.
-
-    `position` is where the object ends up and is what collision checking
-    uses from the moment it is dropped; the drawn box falls onto that spot
-    over the next few frames."""
+    """A red box that can be dropped into the cell to test collisions.
+    `version` goes up every time it moves, so the sequence knows to re-check."""
 
     SIZE = [0.08, 0.08, 0.08]
     STOWED = [0.70, -0.30, 0.04]
-    DROP_HEIGHT = 0.40      # the drawn box starts this far above where it lands
+    DROP_HEIGHT = 0.40      # falls from this high
     DROP_PER_FRAME = 0.05
 
     def __init__(self):
@@ -252,6 +247,91 @@ class DroppedObject:
 
     def _draw(self):
         self.shape.T = SE3(self.position + [0, 0, self._still_to_fall]).A
+
+
+def guard_boxes():
+    """Side guards and light curtain posts as (name, centre, size)."""
+    depth = GUARD_BACK_Y - CURTAIN_Y
+    boxes = []
+    for x in GUARD_X:
+        boxes.append(("side guard", [x, CURTAIN_Y + depth / 2, GUARD_HEIGHT / 2], [0.01, depth, GUARD_HEIGHT]))
+        boxes.append(("light curtain post", [x, CURTAIN_Y, GUARD_HEIGHT / 2], [0.04, 0.04, GUARD_HEIGHT]))
+    return boxes
+
+
+class SafetyEquipment:
+    """Safety gear from the risk assessment:
+      - side guards: stop people being hit from the ends of the desk
+      - light curtain: senses someone reaching in from the front
+      - signal tower: shows the cell state (green run, amber paused, red stopped)
+      - e-stop station: a stop button outside the cell, within reach
+      - yellow markings: keep-out area at the platform, stand-back line on the floor
+    """
+
+    LAMPS = {   # name: (height above the post, lit colour, unlit colour)
+        "green": (0.13, [0.1, 0.9, 0.2, 1], [0.08, 0.3, 0.1, 1]),
+        "amber": (0.20, [1.0, 0.7, 0.0, 1], [0.35, 0.27, 0.05, 1]),
+        "red": (0.27, [1.0, 0.1, 0.1, 1], [0.35, 0.1, 0.1, 1]),
+    }
+    BEAM_HEIGHTS = np.linspace(0.85, 1.70, 6)
+
+    def __init__(self):
+        left, right = GUARD_X
+        mid_x, width = (left + right) / 2, right - left
+
+        self.fixed = []
+        for name, centre, size in guard_boxes():
+            colour = [0.6, 0.8, 0.9, 0.15] if name == "side guard" else YELLOW
+            self.fixed.append(geometry.Cuboid(scale=size, pose=SE3(centre), color=colour))
+        # stand-back line on the floor and keep-out disc under the platform
+        self.fixed.append(geometry.Cuboid(scale=[width, 0.05, 0.004], pose=SE3(mid_x, CURTAIN_Y - 0.30, 0.002),
+                                          color=YELLOW))
+        self.fixed.append(geometry.Cylinder(radius=0.20, length=0.002,
+                                            pose=SE3(*PLATFORM_POSITION.t[:2], TABLE_HEIGHT + 0.001), color=YELLOW))
+        # e-stop station on the outside of the right post
+        self.fixed.append(geometry.Cuboid(scale=[0.10, 0.06, 0.10], pose=SE3(right, CURTAIN_Y - 0.05, 1.0),
+                                          color=YELLOW))
+        self.fixed.append(geometry.Cylinder(radius=0.03, length=0.03, color=[0.9, 0.05, 0.05, 1],
+                                            pose=SE3(right, CURTAIN_Y - 0.095, 1.0) * SE3.Rx(np.pi / 2)))
+        # signal tower pole on top of the right post
+        self.fixed.append(geometry.Cylinder(radius=0.012, length=0.10, color=[0.2, 0.2, 0.2, 1],
+                                            pose=SE3(right, CURTAIN_Y, GUARD_HEIGHT + 0.05)))
+
+        # lamps and beams are drawn twice (lit and unlit); the unused one is hidden
+        self.lamps = {}
+        for name, (height, lit, unlit) in self.LAMPS.items():
+            pose = SE3(right, CURTAIN_Y, GUARD_HEIGHT + height)
+            self.lamps[name] = (geometry.Cylinder(radius=0.035, length=0.06, color=lit),
+                                geometry.Cylinder(radius=0.035, length=0.06, color=unlit), pose)
+        self.beams = []
+        for z in self.BEAM_HEIGHTS:
+            pose = SE3(mid_x, CURTAIN_Y, z) * SE3.Ry(np.pi / 2)
+            self.beams.append((geometry.Cylinder(radius=0.008, length=width, color=[1.0, 0.0, 0.0, 1]),
+                               geometry.Cylinder(radius=0.004, length=width, color=[0.9, 0.2, 0.2, 0.35]), pose))
+        # someone's arm reaching in, shown while the curtain is broken
+        self.intruder = geometry.Cuboid(scale=[0.08, 0.30, 0.06], color=[0.9, 0.7, 0.55, 1])
+        self.intruder_pose = SE3(mid_x, CURTAIN_Y, 1.0)
+
+        self._shown = None
+        self.show("amber")
+
+    @property
+    def shapes(self):
+        changing = [shape for lit, unlit, _ in list(self.lamps.values()) + self.beams for shape in (lit, unlit)]
+        return self.fixed + changing + [self.intruder]
+
+    def show(self, signal, zone_breached=False):
+        """Light one lamp and show whether the light curtain is broken."""
+        if (signal, zone_breached) == self._shown:
+            return
+        self._shown = (signal, zone_breached)
+        for name, (lit, unlit, pose) in self.lamps.items():
+            lit.T = (pose if name == signal else HIDDEN).A
+            unlit.T = (HIDDEN if name == signal else pose).A
+        for lit, unlit, pose in self.beams:
+            lit.T = (pose if zone_breached else HIDDEN).A
+            unlit.T = (HIDDEN if zone_breached else pose).A
+        self.intruder.T = (self.intruder_pose if zone_breached else HIDDEN).A
 
 
 def _segment_pose(p0, p1):
@@ -299,7 +379,7 @@ def static_obstacles():
         ("shelf", Box("shelf", SHELF_CENTRE.t, SHELF_SIZE)),
         ("platform", VCylinder("platform", PLATFORM_POSITION.t, 0.10, PLATFORM_THICKNESS)),
         ("can holder", VCylinder("can holder", CAN_HOLDER_POSITION.t, 0.06, CAN_HOLDER_HEIGHT)),
-    ]
+    ] + [(name, Box(name, centre, size)) for name, centre, size in guard_boxes()]
 
 
 @dataclass
@@ -313,6 +393,7 @@ class Scene:
     figures: list
     obstacles: list
     hazard: DroppedObject
+    safety: SafetyEquipment
     arm2_finger_opening: float = REBOT_FINGER_OPEN
 
     def refresh(self):
@@ -343,6 +424,7 @@ def build_scene(env=None, pot_profiles=()) -> Scene:
     can = WateringCanDuck(SE3(*CAN_HOLDER_POSITION.t[:2], CAN_HOLDER_TOP))
     pots = {p.pot_id: Pot(p, shelf_pose(p)) for p in pot_profiles}
     hazard = DroppedObject()
+    safety = SafetyEquipment()
 
     figures = []
     if env is not None:
@@ -363,10 +445,12 @@ def build_scene(env=None, pot_profiles=()) -> Scene:
         for shape in can.shapes + [s for pot in pots.values() for s in pot.shapes]:
             env.add(shape)
         env.add(hazard.shape)
+        for shape in safety.shapes:
+            env.add(shape)
         env.add(build_wall())
         env.step()
 
-    return Scene(env, arm1, arm2, rebot_visual, can, pots, figures, static_obstacles(), hazard)
+    return Scene(env, arm1, arm2, rebot_visual, can, pots, figures, static_obstacles(), hazard, safety)
 
 
 def reach_report(pot_profiles=()):

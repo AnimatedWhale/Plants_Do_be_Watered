@@ -14,18 +14,12 @@ class ReBotVisual:
         self.robot.q = np.zeros(self.robot.n)
 
     def update(self, dh_robot, dh_q, finger_opening: float = 0.0):
-        """dh_q: its current 6 joint values.
-        finger_opening: 0 (closed) to ~0.05 m (open), mirrored on both
-        fingers per the URDF's mimic joint.
-
-        The URDF's 6 arm joints share the DH model's zeros and directions
-        (end_link sits on the DH flange, i.e. fkine(q) * tool.inv(), to
-        within ~0.2 mm), so the DH joint values drive the mesh directly."""
+        """Copy the DH joint angles onto the mesh (the URDF joints match the DH ones).
+        finger_opening: 0 = closed, up to 0.05 m."""
         self.robot.q = np.r_[np.asarray(dh_q)[:6], finger_opening, -finger_opening]
 
     def flange_error(self, dh_robot, dh_q) -> float:
-        """Position gap (m) between the mesh's end_link and the DH flange,
-        a sanity check that the mesh still tracks the DH model."""
+        """Distance (m) between the mesh's flange and the DH model's. Should be about 0."""
         flange = dh_robot.fkine(dh_q) * self._dh_tool.inv()
         return float(np.linalg.norm(self.robot.fkine(self.robot.q, end="end_link").t - flange.t))
 
