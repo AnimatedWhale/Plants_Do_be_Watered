@@ -17,10 +17,30 @@ do nothing; the reason is printed in the terminal. All the logic lives in
 ShelfCareSequence; this file only wires the controls to it.
 """
 
+from importlib.metadata import PackageNotFoundError, version
+
 import numpy as np
 import swift
 
 ECHO_TICKS = 10         # ignore a joint slider for this long after the panel moves it (stale values echo back)
+
+
+try:
+    SWIFT_2 = int(version("swift-sim").split(".")[0]) >= 2
+except (PackageNotFoundError, ValueError):
+    SWIFT_2 = False
+
+
+def _radio_index(value):
+    """Which radio option is ticked. Swift 1.1 and 2.x report it differently
+    (a number, a string or a list of ticks). None if nothing is ticked."""
+    if isinstance(value, (list, tuple)):
+        if not value:
+            return None
+        if all(isinstance(v, bool) for v in value):
+            return value.index(True) if True in value else None
+        value = value[0]
+    return int(float(value))
 
 
 def _number(value):
@@ -104,7 +124,10 @@ class ControlPanel:
     # callback ignores a value the sim is already at, or it would loop forever.
 
     def _on_mode(self, index):
-        manual = int(_number(index)) == 1
+        index = _radio_index(index)
+        if index is None:
+            return
+        manual = index == 1
         if manual == self.seq.manual:
             return
         self.seq.set_manual(manual)
@@ -140,6 +163,18 @@ class ControlPanel:
             self._shown[key] = value
             setattr(element, attr, value)
 
+    def _show_radio(self, radio, index):
+        """Tick one radio option. Swift 2.x's page wants the plain index, but its
+        Radio class turns it into a list of ticks the page ignores, so set it directly."""
+        if SWIFT_2:
+            if radio._checked != index:     # also re-sends it if the page reported nothing ticked
+                radio._checked, radio._changed = index, True
+            return
+        key = (id(radio), "checked")
+        if self._shown.get(key) != index:
+            self._shown[key] = index
+            radio.checked = [i == index for i in range(len(radio.options))]
+
     def update(self):
         """Call once per pass of the main loop."""
         seq = self.seq
@@ -155,7 +190,7 @@ class ControlPanel:
                 self._moisture_shown[pot_id] = slider.value = value
                 self._moisture_synced[pot_id] = self._tick
 
-        self._set(self.mode, "checked", [not seq.manual, seq.manual])
+        self._show_radio(self.mode, int(seq.manual))
         if self._shown.get("enable") != seq.jog_enabled:
             # set it directly: swift's Checkbox prints every value given to its setter
             self._shown["enable"] = seq.jog_enabled
