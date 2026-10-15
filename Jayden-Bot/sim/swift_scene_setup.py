@@ -70,7 +70,9 @@ try:
 
             super().__init__(address, WindowsPathHandler, *args, **kwargs)
 
-    SwiftRoute.socketserver = types.SimpleNamespace(TCPServer=_ParallelServer)
+    # swift 1.1 asks for TCPServer, swift 2.x for ThreadingTCPServer: give it both
+    SwiftRoute.socketserver = types.SimpleNamespace(TCPServer=_ParallelServer,
+                                                    ThreadingTCPServer=_ParallelServer)
 except ImportError:
     pass
 
