@@ -9,7 +9,7 @@ panel is laid out in sections under heading labels:
   moisture    each plant's moisture level: shows the sensor reading, drag it
               down to its threshold to have that plant watered (again)
   mode        Auto / Manual
-  manual      arm, enable switch, J1-J6 sliders, gripper, go home
+  manual      arm, enable switch, J1-J6 sliders, gripper, go home, what the controller moves
   collision   the red box: where to drop it, drop it, take it away
 
 Controls that don't apply right now (jogging in Auto, Resume while stopped)
@@ -32,8 +32,7 @@ except (PackageNotFoundError, ValueError):
 
 
 def _radio_index(value):
-    """Which radio option is ticked. Swift 1.1 and 2.x report it differently
-    (a number, a string or a list of ticks). None if nothing is ticked."""
+    """Index of the ticked radio option, whatever format Swift sends; None if none."""
     if isinstance(value, (list, tuple)):
         if not value:
             return None
@@ -95,6 +94,9 @@ class ControlPanel:
         self._button("Gripper open", lambda: seq.jog_gripper(False))
         self._button("Gripper close", lambda: seq.jog_gripper(True))
         self._button("Go home", seq.jog_home)
+        self._add(swift.Select(cb=lambda i: seq.set_pad_target(int(_number(i))), desc="Controller moves",
+                               options=["Gripper (x, y, z)"] + [f"J{j + 1}" for j in range(6)], value=0))
+        self.pad_label = self._label("")
 
         self._label("------ COLLISION TEST (red box) ------")
         # the sliders aim the object; it enters the cell when a Drop button is pressed
@@ -164,8 +166,7 @@ class ControlPanel:
             setattr(element, attr, value)
 
     def _show_radio(self, radio, index):
-        """Tick one radio option. Swift 2.x's page wants the plain index, but its
-        Radio class turns it into a list of ticks the page ignores, so set it directly."""
+        """Tick one radio option (Swift 2.x's page needs the plain index)."""
         if SWIFT_2:
             if radio._checked != index:     # also re-sends it if the page reported nothing ticked
                 radio._checked, radio._changed = index, True
@@ -179,6 +180,7 @@ class ControlPanel:
         """Call once per pass of the main loop."""
         seq = self.seq
         self._set(self.status, "desc", seq.status)
+        self._set(self.pad_label, "desc", f"Xbox controller: {seq.pad_status} (left stick + triggers move, View = E-STOP)")
         self._set(self.curtain, "desc", "Clear light curtain" if seq.zone_breached else "Break light curtain")
 
         self._tick += 1
@@ -196,8 +198,7 @@ class ControlPanel:
             self._shown["enable"] = seq.jog_enabled
             self.enable._checked, self.enable._changed = [seq.jog_enabled], True
 
-        # point the joint sliders at the jogged arm's goal whenever it changes
-        # other than by dragging a slider (new arm, jog refused, home...)
+        # re-point the joint sliders when the jogged arm changes other than by dragging
         if seq.jog_version != self._jog_version:
             self._jog_version = seq.jog_version
             arm = seq.jog_arm
