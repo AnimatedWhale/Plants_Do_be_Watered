@@ -1,34 +1,15 @@
 """
-ShelfCare sequence.
+ShelfCare watering sequence.
 
-Two arms:
-  ARM 1 (Stäubli TX2-60)  - shelf pick / place on platform / return to shelf
-  ARM 2 (reBot B601-DM)   - picks up the watering can, pours into the pot
+Arm 1 (Stäubli TX2-60) moves each dry plant between the window sill and the
+platform. Arm 2 (reBot B601-DM) picks up the watering can and pours.
 
-For each plant whose (simulated) moisture is below its threshold:
-  1. arm 1 lifts the pot off the shelf and puts it on the platform
-  2. arm 2 picks the watering can off its holder, pours over the pot,
-     and puts the can back
-  3. arm 1 returns the pot to its shelf slot
-then the next plant is checked, until none need water.
-
-Each pot has known geometry (diameter, height, shelf slot), so the grasp
-point and the pour height scale with the pot instead of being hardcoded.
-
-Free travel uses joint-space moves (jtraj). Approach, lift, retreat and
-carrying a pot use straight-line Cartesian moves (ctraj solved point by
-point with IK), so the gripper never swings sideways into the shelf, the pot
-or the can, and a carried pot stays upright.
-
-Every waypoint of every move is collision-checked (collision.py) against the
-desk, wall, shelf, platform, can holder, pots, can and the other arm before
-the arm moves. A joint move that would hit something is rerouted through the
-arm's home pose; if nothing works the sequence faults and says what would hit.
-
-Run from the repo root:
-    python Jayden-Bot/sim/Selfcare_sequence.py                # Swift in the browser
-    python Jayden-Bot/sim/Selfcare_sequence.py --moisture 10  # force every plant to need water
-    python Jayden-Bot/sim/Selfcare_sequence.py --speed 1      # real-time playback (default 4x)
+Run from the repo root (run_full.py / run_lite.py do the same with full or
+simplified reBot meshes):
+    python Jayden-Bot/sim/Selfcare_sequence.py                   # open Swift
+    python Jayden-Bot/sim/Selfcare_sequence.py --moisture 10     # water every plant
+    python Jayden-Bot/sim/Selfcare_sequence.py --speed 1         # real-time playback
+    python Jayden-Bot/sim/Selfcare_sequence.py --collision-test  # drop an object in the way
 """
 
 import argparse
@@ -42,7 +23,7 @@ import numpy as np
 import roboticstoolbox as rtb
 from spatialmath import SE3
 
-from swift_scene_setup import (ARM1_PARK, CAN_HOLDER_HEIGHT, CAN_HOLDER_POSITION, CAN_HOLDER_TOP, PLATFORM_POSITION,
+from swift_scene_setup import (ARM1_PARK, CAN_HOLDER_POSITION, CAN_HOLDER_TOP, PLATFORM_POSITION,
                                PLATFORM_TOP, REBOT_FINGER_OPEN, SHELF_CENTRE, SHELF_HEIGHT, SHELF_SIZE, TABLE_CENTRE,
                                TABLE_HEIGHT, TABLE_SIZE, DroppedObject, Pot, WateringCanDuck, build_scene)
 from collision import Box, VCylinder, Spheres, capsule, cylinder, first_collision, rebot_body, tx2_60_body
@@ -96,8 +77,7 @@ POT_REGISTRY = {
 
 DT = 0.05
 DEFAULT_SPEED = 5
-# Every move is timed from how far it goes, easing in and out, so nothing
-# jumps or crawls. Speeds are real time (before the --speed playback factor).
+# Speeds (real time, before the --speed playback factor)
 TCP_SPEED = 0.20                # m/s, top gripper speed on straight-line and arc moves
 TCP_TURN_SPEED = np.deg2rad(60) # rad/s, top gripper turning speed
 LOWER_SPEED = 0.08              # m/s, bringing a pot down from its hover over the platform
@@ -109,7 +89,7 @@ MIN_STEPS = 10
 GRIP_TICKS = 10
 ARM1_BACKOFF = 0.15
 ARM2_BACKOFF = 0.08
-ARM1_PITCH = np.deg2rad(45)     # grip angled down: keeps the wrist bent (away from its singularity) at the shelf
+ARM1_PITCH = np.deg2rad(45)     # grip tilted down keeps the TX2-60 wrist off its singularity
 ARM1_MIN_GRIP_HEIGHT = 0.05      # m above the pot base, so angled-down fingertips clear the shelf
 ARM1_GRIP_BELOW_RIM = 0.05       # m, grip at most this far under the rim so the wrist clears a tall pot
 ARM2_GRIP_DEPTH = 0.02          # how far the fingertips reach past the centre of the can's handle bar
@@ -119,29 +99,29 @@ PLATFORM_HOVER = 0.12            # m, carried pot comes round this far above the
 CARRY_DROP = (0.35, 1.0)          # height changes only in the 2nd half of the swing to the platform...
 CARRY_RISE = (0.0, 0.5)          # ...and the 1st half of the swing back, so the pot is high past the shelf
 PLATFORM_APPROACH_OFFSETS = [0, 15, -15, 30, -30, 45, -45, 60, -60]   # deg off head-on; head-on keeps the wrist untwisted
-MAX_CARRY_WRIST_ROLL = 250.0     # deg of J4 + J6 turning allowed while carrying a pot to the platform (one smooth roll)
-SHELF_RETREAT = 0.15             # m, how far a lifted pot is pulled back (along the grip axis) before swinging round
+MAX_CARRY_WRIST_ROLL = 250.0     # deg, most wrist roll (J4 + J6) allowed while carrying a pot
+SHELF_RETREAT = 0.15             # m, pull-back from the sill before swinging round
 CARRY_LIFT = 0.10
-POUR_ANGLE = np.deg2rad(80)     # pour tilt angle, about the can's own y axis (see _plan_pour)
+CARRY_MAX_TILT = np.deg2rad(10)  # the full can may lean this much while it is carried
+CARRY_HUMPS = (0.0, 0.08, 0.15)  # extra height tried in the middle of a level swing
+POUR_ANGLE = np.deg2rad(80)     # how far the can tips to pour
 POUR_STEPS = 60                 # waypoints in the pour tilt
-POUR_RIM_INSET = 0.015          # the spout tip sits this far inside the pot's rim, so the water runs down its side
-POUR_FLOOR_MARGIN = 0.02        # the tilting can's body stays this far above the platform
-POUR_APPROACH_LIFT = 0.10       # the can arrives this far above its pour start, then comes straight down
+POUR_RIM_INSET = 0.015          # spout tip sits this far inside the pot rim
+POUR_FLOOR_MARGIN = 0.02        # gap kept between the can and the platform
+POUR_APPROACH_LIFT = 0.10       # the can arrives this high above the pour start
 POUR_RATE_ML_S = 50.0
 MAX_JOINT_STEP = 0.3
-MIN_UPRIGHT_COS = 0.0           # the held can's own 'up' axis must never cross past horizontal
-                                 #   (0 = exactly horizontal) at any point during the pour tilt sweep.
-                                 #   A deliberate 80 deg pour legitimately dips to ~0.17-0.38; this only
-                                 #   catches genuine inversion, never the intended pour itself.
+ZONE_AUTO_RESUME = True         # True: carry on when the light curtain clears. False: needs Acknowledge + Resume
+MIN_UPRIGHT_COS = 0.0           # the can must never tip past level (0 = level)
 
-# Manual (teach) mode. ISO 10218-1 caps the TCP at 250 mm/s in reduced-speed
-# manual mode, and manual moves play in real time (no --speed factor).
+# Manual mode: ISO 10218-1 limits the TCP to 250 mm/s; manual moves play in real time.
 MANUAL_JOINT_SPEED_FRACTION = 0.10   # share of the TX2-60's rated joint speeds when jogging
 MANUAL_TCP_SPEED = 0.25              # m/s, cap on the gripper during a manual joint move
 MANUAL_WORK_REACH = 0.15             # m, the object nearest the gripper within this may be reached into
 GRAB_TOLERANCE = 0.02                # m, how far the TCP may be off an object and still grab it
 ARM1_FINGER_CLOSED = 0.01            # TX2-60 finger offset with nothing in the gripper
 REBOT_FINGER_CLOSED = 0.003          # reBot finger travel with nothing in the gripper
+PAD_TCP_SPEED = 0.10                 # m/s, gripper speed with the controller stick pushed all the way
 
 DOWN = np.array([0.0, 0.0, -1.0])
 
@@ -168,9 +148,7 @@ def horizontal_unit(v):
 
 
 def side_grasp(point, approach, pitch=0.0) -> SE3:
-    """TCP pose for a grasp: tool z = approach direction, tilted down
-    by `pitch` from horizontal; tool x = 'down' square to that; fingers close
-    along tool y, i.e. horizontally."""
+    """Grasp pose at `point`: tool z along `approach`, tilted down by `pitch`."""
     h = horizontal_unit(approach)
     a = np.cos(pitch) * h + np.sin(pitch) * DOWN
     x = np.cos(pitch) * DOWN - np.sin(pitch) * h
@@ -178,8 +156,7 @@ def side_grasp(point, approach, pitch=0.0) -> SE3:
 
 
 def can_stays_upright(R_carry, R_can_in_tool, tilt_axis_fn, sign, max_angle, steps=9) -> bool:
-    """True if the held object's own 'up' axis stays above MIN_UPRIGHT_COS
-    of world-up for every angle from 0 to max_angle of the pour tilt."""
+    """True if the can never tips past level during the pour."""
     for deg in np.linspace(0, np.rad2deg(max_angle), steps):
         R = R_carry @ tilt_axis_fn(sign * np.deg2rad(deg)).R
         up = (R @ R_can_in_tool)[:, 2]
@@ -208,10 +185,7 @@ def solve_ik(arm, T_goal: SE3, q0, slimit=100):
 
 
 def _nearest(arm, q, q_ref):
-    """The joint vector for the same pose as q that is nearest q_ref, for arms
-    that have more than one (the TX2-60's wrist can flip, and J1/J4/J6 can go
-    a full turn either way). Without it the IK picks freely and the wrist
-    spins extra half and full turns between poses."""
+    """Same pose as q, but the joint solution nearest q_ref (stops the TX2-60 wrist spinning extra turns)."""
     return arm.closest_equivalent(q, q_ref) if hasattr(arm, "closest_equivalent") else q
 
 
@@ -241,17 +215,7 @@ def cartesian_move(arm, q_from, T_to: SE3, speed=TCP_SPEED):
 
 
 def arc_move(arm, q_from, T_to: SE3, height_change=(0.0, 1.0), speed=TCP_SPEED):
-    """Swing round the arm's base axis. The height only changes during the
-    `height_change` part of the swing (fractions of it), so a carried pot can
-    stay high while it passes the shelf plants and drop only once clear. The
-    tool turns only about the vertical, so a carried pot stays upright: it
-    swings round with the arm, and any extra turn needed to reach T_to's
-    heading is made along with the height change.
-
-    The swing is about the arm's own plane, which for the TX2-60 sits
-    `plane_offset` (its 20 mm D3) to the side of the base axis. Keeping the
-    gripper in that plane the whole way means J4 and J6 can stay at zero and
-    only J5 bends the wrist (up and down), even where it passes straight."""
+    """Swing round the arm's base keeping the tool upright; the height only changes during `height_change`."""
     T_from = arm.fkine(q_from)
     c = arm.base.t
     side = getattr(arm, "plane_offset", 0.0)
@@ -281,12 +245,35 @@ def arc_move(arm, q_from, T_to: SE3, height_change=(0.0, 1.0), speed=TCP_SPEED):
             poses.append(SE3.Rt(R, c + r * out + side * across + [0.0, 0.0, z - c[2]]))
         return poses
 
-    # Time it so the fastest stretch of the swing runs at `speed`
     trial = path(50)
     move = max(np.linalg.norm(b.t - a.t) for a, b in zip(trial, trial[1:]))
     spin = max(abs((a.inv() * b).angvec()[0]) for a, b in zip(trial, trial[1:]))
     steps = max(MIN_STEPS, int(np.ceil(49 * max(move / (speed * DT), spin / (TCP_TURN_SPEED * DT)))) + 1)
     return follow_poses(arm, q_from, path(steps))
+
+
+def upright_move(arm, q_from, T_to: SE3, hump=0.0, speed=TCP_SPEED):
+    """Swing round the base to T_to, turning only about the vertical, so a held can stays level."""
+    T_from = arm.fkine(q_from)
+    turn = T_to.R @ T_from.R.T
+    yaw = atan2(turn[1, 0], turn[0, 0])
+    c = arm.base.t
+    p0, p1 = T_from.t - c, T_to.t - c
+    r0, r1 = np.hypot(*p0[:2]), np.hypot(*p1[:2])
+    a0 = atan2(p0[1], p0[0])
+    da = (atan2(p1[1], p1[0]) - a0 + np.pi) % (2 * np.pi) - np.pi
+
+    def path(steps):
+        poses = []
+        for t in np.linspace(0.0, 1.0, steps):
+            s = (1 - np.cos(np.pi * t)) / 2
+            a, r, z = a0 + s * da, r0 + s * (r1 - r0), p0[2] + s * (p1[2] - p0[2]) + hump * np.sin(np.pi * s)
+            poses.append(SE3.Rt(SE3.Rz(s * yaw).R @ T_from.R, c + [r * np.cos(a), r * np.sin(a), z], check=False))
+        return poses
+
+    trial = path(50)
+    length = sum(np.linalg.norm(b.t - a.t) for a, b in zip(trial, trial[1:]))
+    return follow_poses(arm, q_from, path(_ticks(PEAK * max(length / speed, abs(yaw) / TCP_TURN_SPEED))))
 
 
 def follow_poses(arm, q_from, poses):
@@ -380,11 +367,12 @@ class ShelfCareSequence:
         self._finger_goal = REBOT_FINGER_OPEN
         self._arm1_finger_goal = FINGER_OFFSET   # TX2-60 fingers: inner face distance from the TCP
 
-        self.stop_latched = False               # a protective stop or planning fault, cleared by acknowledge()
-        self.waiting = False                    # reset to the start and not yet told to go
+        self.stop_latched = False               # stopped, needs Acknowledge
+        self.waiting = False                    # reset, waiting for Resume
+        self.zone_breached = False              # light curtain broken
         self._start = (self.arm1.q.copy(), self.arm2.q.copy(), self.can.T,
                        {pot_id: pot.T for pot_id, pot in self.pots.items()})
-        self._transit_goal = None               # where the queued motion ends, if it is a free joint move
+        self._transit_goal = None               # end of the current free joint move, if it is one
         self._hazard_checked = scene.hazard.version
         self._hazard_xyz = np.array([0.70, 0.35, 1.00])
 
@@ -395,12 +383,15 @@ class ShelfCareSequence:
         self.jog_arm = self.arm1                # the arm the manual controls move
         self.jog_enabled = False                # the enable switch: nothing jogs unless it is on
         self.jog_version = 0                    # bumped whenever the joint sliders should re-read the arm
+        self.pad_target = 0                     # what the controller moves: 0 = gripper (x, y, z), 1-6 = that joint
+        self.pad_status = "not found"           # set by gamepad.py, shown in the panel
+        self._pad_moving = False
+        self._pad_refused = None
 
     # --- safety -------------------------------------------------------
 
     def estop(self):
-        """Stop both arms where they are, in any mode. It stays stopped until
-        acknowledged, even if nothing was moving when it was pressed."""
+        """Stop both arms in any mode. Stays stopped until acknowledged."""
         if self.estop_active:
             return
         self.estop_active = True
@@ -413,9 +404,28 @@ class ShelfCareSequence:
             self.fault_reason = "E-STOP pressed"
         self._log("E-STOP")
 
+    def unsafe_zone(self, active: bool):
+        """Light curtain signal. Motion pauses while it is broken."""
+        if active == self.zone_breached:
+            return
+        self.zone_breached = active
+        self._log("light curtain BROKEN - paused" if active else "light curtain clear")
+        if active and not ZONE_AUTO_RESUME and self.state not in (State.FAULT, State.DONE) and not self.waiting:
+            self._protective_stop("light curtain broken")
+        if not active:
+            self._hazard_checked = None     # re-check the path
+
+    @property
+    def signal(self):
+        """Which signal tower lamp is lit: red stopped, amber paused / manual / idle, green running."""
+        if self.stopped or self.state == State.FAULT:
+            return "red"
+        if self.zone_breached or self.paused or self.manual or self.waiting or self.state == State.DONE:
+            return "amber"
+        return "green"
+
     def acknowledge(self):
-        """The operator has seen the stop and dealt with its cause. Nothing
-        moves: this only makes resume() available again."""
+        """Clear a stop. Nothing moves until Resume."""
         if self.estop_active or self.stop_latched:
             self.estop_active = False
             self.stop_latched = False
@@ -424,15 +434,14 @@ class ShelfCareSequence:
             self._log("nothing to acknowledge")
 
     def resume(self):
-        """Start after a reset, carry on after Pause, or carry on with the
-        interrupted task after a stop that has been acknowledged."""
+        """Start after a reset, or carry on after a pause or an acknowledged stop."""
         if self.estop_active or self.stop_latched:
             self._log("still stopped - press Acknowledge first")
         elif self.manual:
             self._log("in manual mode - switch to Auto to run the sequence")
         elif self.paused:
             self.paused = False
-            self._hazard_checked = None     # look again at whatever is still queued before moving
+            self._hazard_checked = None
             self._log("resumed")
         elif self.waiting:
             self.waiting = False
@@ -445,8 +454,7 @@ class ShelfCareSequence:
             self._log("cannot carry on from this stop - press Reset to start over")
 
     def pause(self):
-        """Hold: a normal (not safety) stop. The arm stops at its next
-        waypoint and Resume carries on, no acknowledge needed."""
+        """Normal (not safety) stop: Resume carries on, no acknowledge needed."""
         if self.manual:
             self.jog_enabled = False
             self._queue.clear()
@@ -461,10 +469,7 @@ class ShelfCareSequence:
         self.override = float(np.clip(float(percent) / 100.0, 0.05, 1.0))
 
     def set_manual(self, manual):
-        """Switch between Auto and Manual. Manual is only allowed while the
-        sequence is not moving (paused, stopped, at the start or done).
-        Going back to Auto resets the cell, since the arms are no longer
-        where the sequence left them."""
+        """Switch Auto / Manual. Manual only when nothing is running; back to Auto resets the cell."""
         if manual == self.manual:
             return
         if manual:
@@ -488,9 +493,7 @@ class ShelfCareSequence:
             self._log("AUTO mode - cell reset to the start, press Start / Resume to run")
 
     def reset(self):
-        """Put the whole cell back as it was at the start (arms home, plants
-        on the shelf, can on its holder, dropped object taken away) and wait
-        there. resume() then runs the sequence from the beginning."""
+        """Put everything back to the start and wait for Resume."""
         q1, q2, T_can, pot_poses = self._start
         self._queue.clear()
         self._hold = 0
@@ -520,18 +523,21 @@ class ShelfCareSequence:
 
     @property
     def status(self):
-        """What the operator should see: the mode, the state, why it stopped, what to press."""
+        """Text for the status label."""
         if self.estop_active or self.stop_latched:
             return f"STOPPED - {self.fault_reason} - press Acknowledge"
         if self.manual:
             jog = "jogging" if self._queue else ("enabled" if self.jog_enabled else "tick Enable jog to move")
-            return f"MANUAL - {self.jog_arm.name} - {jog}"
+            curtain = " - PAUSED, light curtain broken" if self.zone_breached else ""
+            return f"MANUAL - {self.jog_arm.name} - {jog}{curtain}"
         if self.waiting:
             return "AUTO - READY at the start - press Start / Resume to run"
         if self.state == State.DONE:
             return "AUTO - DONE - press Reset to go back to the start"
         if self.paused:
             return f"AUTO - PAUSED in {self.state.name} - press Start / Resume to carry on"
+        if self.zone_breached and self.state != State.FAULT:
+            return f"AUTO - PAUSED - light curtain broken during {self.state.name} - clear the zone to continue"
         if self.state == State.CHECK_MOISTURE and self.current_pot is None and self._all_ok_reported:
             return "AUTO - every plant is moist enough - watching the moisture levels"
         if self.state != State.FAULT:
@@ -542,7 +548,7 @@ class ShelfCareSequence:
 
     @property
     def stopped(self):
-        """True while a latched stop (E-STOP or protective stop) is in force."""
+        """True while an E-STOP or protective stop is latched."""
         return self.estop_active or self.stop_latched
 
     def _fault(self, reason):
@@ -553,9 +559,7 @@ class ShelfCareSequence:
         self.state = State.FAULT
 
     def _protective_stop(self, reason):
-        """Stop where the arm is, keeping the motion still queued. Once the
-        stop is acknowledged, resume re-checks that motion and carries on if
-        it is clear."""
+        """Stop where we are but keep the planned path, so Resume can carry on."""
         self._log(f"PROTECTIVE STOP: {reason}")
         self.fault_reason = f"{self.state.name}: {reason}"
         self._resume_state = self.state
@@ -565,10 +569,7 @@ class ShelfCareSequence:
     # --- dropped object (collision test) ----------------------------------
 
     def drop_obstacle_ahead(self):
-        """Drop the loose object where the moving arm's TCP is about to be:
-        the first point from half-way along the motion still queued where the
-        object lands clear of both arms as they are now, so it is an upcoming
-        collision and not one that has already happened."""
+        """Drop the object on the moving arm's path, a bit ahead of it."""
         if not self._queue:
             self._log("no arm is moving, nothing to drop the object in front of")
             return
@@ -589,15 +590,13 @@ class ShelfCareSequence:
         return len(self._queue)
 
     def too_close_to_obstacle(self):
-        """True if either arm, or what it holds, is inside its required
-        clearance from the dropped object right now."""
+        """True if an arm is closer to the dropped object than allowed."""
         hazard = [o for o in self._obstacles() if o[0] == "dropped object"]
         return any(first_collision(self._body(arm, arm.q), [], self._held_spheres(arm, arm.q), hazard) is not None
                    for arm in (self.arm1, self.arm2))
 
     def aim_obstacle(self, axis, value):
-        """Set where place_obstacle() puts the object. If it is already in
-        the cell it slides there straight away."""
+        """Choose where the object gets dropped (moves it if it is already there)."""
         self._hazard_xyz[axis] = value
         if self._scene.hazard.placed:
             self._scene.hazard.place(self._hazard_xyz, fall=False)
@@ -612,10 +611,8 @@ class ShelfCareSequence:
             self._log("object removed")
 
     def _path_still_clear(self):
-        """Re-check the motion still queued whenever the dropped object has
-        moved. A blocked free joint move is re-routed around the object; any
-        other blocked move (a straight line, a carry, the pour) cannot change
-        its path, so the arm stops before it gets there."""
+        """Check the planned path again when the object moves.
+        Go around it if we can, otherwise stop."""
         hazard = self._scene.hazard
         if self._hazard_checked == hazard.version:
             return True
@@ -637,12 +634,7 @@ class ShelfCareSequence:
         self._protective_stop(f"upcoming collision ({hit})")
         return False
 
-    # --- manual (teach) mode ------------------------------------------------
-    #
-    # One arm at a time, picked with select_jog_arm(). Every jog is planned
-    # from where the arm is to where it was asked to go, collision-checked
-    # like the automatic moves, and played in real time at reduced speed
-    # (MANUAL_* above). A jog that would hit something does not move at all.
+    # --- manual (teach) mode: every jog is collision-checked and runs at reduced speed ---
 
     def select_jog_arm(self, index):
         arm = (self.arm1, self.arm2)[int(index)]
@@ -675,8 +667,7 @@ class ShelfCareSequence:
         return False
 
     def _start_jog(self, plan, what):
-        """Replace any jog still playing with a new one, planned from where
-        the arm is right now. plan(q_now) returns the waypoints."""
+        """Replace any jog in progress with plan(q_now)."""
         arm = self.jog_arm
         self._queue.clear()
         try:
@@ -708,9 +699,55 @@ class ShelfCareSequence:
             return qs
         self._start_jog(plan, f"J{joint + 1} jog")
 
+    def set_pad_target(self, index):
+        """Panel dropdown: 0 = the controller moves the gripper, 1-6 = that joint."""
+        self.pad_target = int(index)
+        self._log("controller moves " + ("the gripper (x, y, z)" if self.pad_target == 0 else f"J{self.pad_target}"))
+
+    def pad_jog(self, x, y, z):
+        """One tick of controller input (-1..1): step the gripper in world x/y/z, or the picked joint."""
+        if not (x or y or z):
+            if self._pad_moving:                 # stick let go: stop, and let the sliders catch up
+                self._pad_moving = False
+                self._queue.clear()
+                self.jog_version += 1
+            return
+        if not (self.manual and self.jog_enabled and not self.stopped and not self.zone_breached):
+            return
+        arm = self.jog_arm
+        q_now = arm.q
+        if self.pad_target == 0:
+            goal = SE3(np.array([x, y, z]) * PAD_TCP_SPEED * DT) * arm.fkine(q_now)
+            try:
+                q_next = solve_ik(arm, goal, q_now, slimit=10)
+            except PlanningError:
+                at_limit = [f"J{j + 1}" for j in range(arm.n)
+                            if min(abs(q_now[j] - arm.qlim[0, j]), abs(q_now[j] - arm.qlim[1, j])) < np.deg2rad(1)]
+                why = f" ({', '.join(at_limit)} at their limits: move them off with the joint sliders)" if at_limit else ""
+                return self._pad_refuse("the gripper can't go further that way" + why)
+            if np.abs(q_next - q_now).max() > MAX_JOINT_STEP:
+                return self._pad_refuse("the arm would have to flip its wrist")
+        else:
+            j = self.pad_target - 1
+            q_next = q_now.copy()
+            q_next[j] = np.clip(q_now[j] + x * self._joint_speed(arm)[j] * DT, *arm.qlim[:, j])
+            if q_next[j] == q_now[j]:
+                return self._pad_refuse(f"J{j + 1} is at its limit")
+        hit = self._first_collision(arm, [q_next])
+        if hit is not None:
+            return self._pad_refuse(hit)
+        self._queue.clear()
+        self._enqueue(arm, [q_next])
+        self._pad_moving = True
+        self._pad_refused = None
+
+    def _pad_refuse(self, reason):
+        if reason != self._pad_refused:
+            self._pad_refused = reason
+            self._log(f"controller jog stopped: {reason}")
+
     def jog_home(self):
-        """Take the jogged arm back to its home (parked) pose, re-routing round
-        anything in the way like the automatic moves do."""
+        """Take the jogged arm home, re-routing round anything in the way."""
         if not self._can_jog():
             return
         arm = self.jog_arm
@@ -723,9 +760,7 @@ class ShelfCareSequence:
             self._log(f"{arm.name} going home")
 
     def jog_gripper(self, close):
-        """Open or close the jogged arm's gripper. Closing on a pot or the
-        can's handle picks it up; opening lets go of what it holds, which
-        then settles onto whatever is under it."""
+        """Open or close the jogged arm's gripper; closing on a pot or the can picks it up."""
         if not self._can_jog():
             return
         arm = self.jog_arm
@@ -762,9 +797,7 @@ class ShelfCareSequence:
         return obj.profile.pot_id if isinstance(obj, Pot) else "watering can"
 
     def _graspable(self, arm):
-        """The pot or can the gripper is in position to grab, and how far
-        each finger closes to hold it: a pot when the TCP is inside its wall
-        and between its base and rim, the can when the TCP is at its handle."""
+        """The pot or can the gripper can grab from where it is, and how far the fingers close on it."""
         tcp = arm.fkine(arm.q).t
         for pot in self.pots.values():
             if pot is self._held:
@@ -781,8 +814,7 @@ class ShelfCareSequence:
         return None, 0.0
 
     def _object_near_gripper(self, arm, q):
-        """In manual mode the gripper may reach into the pot or can nearest
-        it (to pick it up), as the automatic moves do with their work object."""
+        """The object near the gripper that a manual jog may reach into."""
         tcp = arm.fkine(q).t
         near = [(np.linalg.norm((pot.T.t + [0, 0, pot.profile.height_mm / 2000]) - tcp), pot_id)
                 for pot_id, pot in self.pots.items() if pot is not self._held]
@@ -793,9 +825,7 @@ class ShelfCareSequence:
         return min(near)[1] if near else None
 
     def _settle(self, obj):
-        """A let-go object drops straight down onto the highest surface
-        under it (shelf, platform, can holder, desk or floor) and stands
-        upright there, keeping its heading."""
+        """A released object drops onto the highest surface below it."""
         x, y, z = obj.T.t
         surfaces = [0.0]
         for centre, size, top in ((TABLE_CENTRE.t, TABLE_SIZE, TABLE_HEIGHT), (SHELF_CENTRE.t, SHELF_SIZE, SHELF_HEIGHT)):
@@ -830,9 +860,7 @@ class ShelfCareSequence:
     # --- main tick ----------------------------------------------------
 
     def _ticks_now(self):
-        """Waypoints to play this tick: the playback speed (real time in
-        manual) times the speed override, carried over between ticks so a
-        fractional override still averages out right."""
+        """Waypoints to play this tick: playback speed x override (fractions carried over)."""
         self._budget += (1 if self.manual else self.speed) * self.override
         n = int(self._budget)
         self._budget -= n
@@ -840,6 +868,8 @@ class ShelfCareSequence:
 
     def step(self):
         if self.estop_active or self.stop_latched:
+            return
+        if self.zone_breached:
             return
         if self.manual:
             self._manual_step()
@@ -863,7 +893,7 @@ class ShelfCareSequence:
             try:
                 self._enter(state)
             except PlanningError as e:
-                # nothing has moved yet: once acknowledged, resume plans this state again
+                # nothing moved yet, so Resume can plan this step again
                 self._fault(str(e))
                 self._resume_state, self._entered, self.stop_latched = state, False, True
             return
@@ -890,9 +920,7 @@ class ShelfCareSequence:
         arm1, arm2, can = self.arm1, self.arm2, self.can
 
         if state == State.CHECK_MOISTURE:
-            # the first plant (small, medium, large) at or below its threshold;
-            # a watered plant goes to 100%, so it isn't picked again until its
-            # level is turned back down
+            # the first plant at or below its threshold (a watered plant reads 100%)
             self.current_pot = None
             for pot_id, pot in self.pots.items():
                 if self.needs_water(pot_id):
@@ -916,13 +944,13 @@ class ShelfCareSequence:
         elif state == State.ARM1_GRASP:
             self._grasp(arm1, self.current_pot)
         elif state == State.ARM1_LIFT_FROM_SHELF:
-            self._move_line(arm1, up(self._T_shelf, LIFT), SET_DOWN_SPEED)        # ease it off the shelf
+            self._move_line(arm1, up(self._T_shelf, LIFT), SET_DOWN_SPEED)
             self._move_line(arm1, back(up(self._T_shelf, LIFT), ARM1_BACKOFF))
             self._move_line(arm1, self._shelf_transit())
         elif state == State.ARM1_TO_PLATFORM:
             self._carry_to_platform()
         elif state == State.ARM1_LOWER_ONTO_PLATFORM:
-            self._move_line(arm1, self._T_platform, SET_DOWN_SPEED)        # set it down gently
+            self._move_line(arm1, self._T_platform, SET_DOWN_SPEED)
         elif state == State.ARM1_RELEASE:
             self._release()
         elif state == State.ARM1_RETREAT:
@@ -930,10 +958,7 @@ class ShelfCareSequence:
             self._move_joint_q(arm1, ARM1_PARK)
 
         elif state == State.ARM2_GET_CAN:
-            # Side grasp of the can's carry handle: come in level, square to
-            # the bar, from arm 2's side of the can. The level grasp is rolled
-            # a quarter turn so the fingers close vertically, one over the bar
-            # and one under it.
+            # grab the handle bar from the side: one finger over it, one under
             bar_centre = transform_point(can.T, can.handle_bar_local)
             bar_direction = can.T.R @ can.handle_bar_direction_local
             across = np.cross([0.0, 0.0, 1.0], bar_direction)
@@ -948,9 +973,8 @@ class ShelfCareSequence:
         elif state == State.ARM2_LIFT_CAN:
             self._move_line(arm2, up(self._T_can, CARRY_LIFT))
         elif state == State.ARM2_TO_POUR_POSITION:
-            q_above, self._lower_qs, self._pour_qs = self._plan_pour()
-            self._move_joint_q(arm2, q_above)
-            self._enqueue(arm2, self._lower_qs)
+            self._carry_qs, self._lower_qs, self._pour_qs = self._plan_pour()
+            self._enqueue(arm2, self._carry_qs + self._lower_qs)
         elif state == State.ARM2_POUR:
             volume = self.current_pot.profile.water_volume_ml
             self._enqueue(arm2, self._pour_qs)
@@ -958,11 +982,11 @@ class ShelfCareSequence:
             self._log(f"pouring {volume:.0f} ml")
         elif state == State.ARM2_UNTILT:
             pot_id = self.current_pot.profile.pot_id
-            self.moisture[pot_id] = 100.0       # watered
+            self.moisture[pot_id] = 100.0
             self._log(f"{pot_id} watered: moisture now 100%")
             self._enqueue(arm2, reversed(self._lower_qs + self._pour_qs))
         elif state == State.ARM2_RETURN_CAN:
-            self._move_joint(arm2, up(self._T_can, CARRY_LIFT))
+            self._enqueue(arm2, reversed(self._carry_qs))     # same way back, so the can stays upright
             self._move_line(arm2, self._T_can, LOWER_SPEED)
         elif state == State.ARM2_RELEASE_CAN:
             self._release()
@@ -977,11 +1001,11 @@ class ShelfCareSequence:
             self._grasp(arm1, self.current_pot)
         elif state == State.ARM1_RETURN_TO_SHELF:
             above_slot = up(self._T_shelf, LIFT)
-            self._move_line(arm1, self._over_platform(), LOWER_SPEED)          # ease it off the platform
+            self._move_line(arm1, self._over_platform(), LOWER_SPEED)
             self._move_arc(arm1, self._shelf_transit(), height_change=CARRY_RISE)
             self._move_line(arm1, back(above_slot, ARM1_BACKOFF))
             self._move_line(arm1, above_slot)
-            self._move_line(arm1, self._T_shelf, SET_DOWN_SPEED)           # set it down gently
+            self._move_line(arm1, self._T_shelf, SET_DOWN_SPEED)
         elif state == State.ARM1_RELEASE_ON_SHELF:
             self._release()
         elif state == State.ARM1_HOME:
@@ -994,8 +1018,7 @@ class ShelfCareSequence:
     # --- moisture ------------------------------------------------------------
 
     def _fresh_moisture(self):
-        """A reading for every plant: the simulated sensor's random value, or
-        --moisture for all of them."""
+        """A moisture reading for every plant (random, or --moisture)."""
         return {pot_id: float(self.force_moisture if self.force_moisture is not None else read_moisture(pot_id))
                 for pot_id in self.pots}
 
@@ -1003,26 +1026,19 @@ class ShelfCareSequence:
         return self.moisture[pot_id] <= self.pots[pot_id].profile.moisture_threshold
 
     def set_moisture(self, pot_id, percent):
-        """Set a plant's moisture by hand (GUI slider). Turning a watered
-        plant back down to its threshold queues it up again."""
+        """Set a plant's moisture by hand (panel slider)."""
         self.moisture[pot_id] = float(np.clip(percent, 0.0, 100.0))
         self._log(f"{pot_id} moisture set to {self.moisture[pot_id]:.0f}%"
                   + (" - needs water" if self.needs_water(pot_id) else ""))
 
     def _arm1_facing(self, point, offset=0.0):
-        """Horizontal direction for arm 1 to grip `point` from: along the arm's
-        own plane (offset = 0), so the wrist needs no sideways twist (J4 = J6 = 0)."""
+        """Direction for arm 1 to grip `point` from, in its own plane (no wrist twist)."""
         h = self.arm1.arm_heading(point) + offset
         return np.array([np.cos(h), np.sin(h), 0.0])
 
     def _carry_to_platform(self):
-        """Swing the pot round to the platform and lower it, choosing which
-        side arm 1 grips it from there. Coming at the platform head-on
-        (gripper pointing straight out from the arm), the TX2-60's wrist must
-        pass through its singularity on the way down from the shelf, and J4/J6
-        whip round half a turn. The pot is round, so it can just as well be set
-        down gripped from an angle. Try approach angles from head-on outwards
-        and keep the first with no collision and little wrist roll."""
+        """Swing the pot to the platform, trying grip angles until one is collision-free
+        and keeps the TX2-60 wrist away from its singularity."""
         arm1 = self.arm1
         grip = np.array([*PLATFORM_POSITION.t[:2], PLATFORM_TOP + self._grasp_height(self.current_pot)])
         problem = None
@@ -1031,11 +1047,10 @@ class ShelfCareSequence:
             try:
                 swing = self._checked_arc(arm1, self._last_q(arm1), self._over_platform(), CARRY_DROP)
                 down = self._checked_line(arm1, swing[-1], up(self._T_platform, LIFT), LOWER_SPEED)
-                # the moves that follow from this side have to be clear too:
-                # setting the pot down, then backing away from it once released
+                # the set-down and the back-off from this side must be clear too
                 set_down = cartesian_move(arm1, down[-1], self._T_platform, SET_DOWN_SPEED)
                 pot, carried_pose = self._held, self._held.T
-                pot.set_pose(self._T_platform * self._T_tool_obj)       # where it will have been put down
+                pot.set_pose(self._T_platform * self._T_tool_obj)
                 self._held = self._holder = None
                 try:
                     away = self._checked_line(arm1, set_down[-1], back(self._T_platform, ARM1_BACKOFF))
@@ -1055,8 +1070,7 @@ class ShelfCareSequence:
         raise PlanningError(f"{arm1.name}: no clean way to set the pot on the platform (last problem: {problem})")
 
     def _shelf_transit(self) -> SE3:
-        """Pot lifted clear of the shelf, then pulled straight back
-        (horizontally) towards arm 1, ready to swing round."""
+        """Pot lifted off the sill and pulled back towards arm 1, ready to swing round."""
         towards_arm = -horizontal_unit(self._T_shelf.R[:, 2])
         return SE3(SHELF_RETREAT * towards_arm) * up(self._T_shelf, SHELF_CLEARANCE)
 
@@ -1066,37 +1080,13 @@ class ShelfCareSequence:
 
     @staticmethod
     def _grasp_height(pot):
-        """Grip height above the pot's base. The TX2-60 grips angled down at
-        ARM1_PITCH, so its wrist sits above and behind the fingers: gripping
-        no lower than ARM1_GRIP_BELOW_RIM under the rim keeps the wrist clear
-        of a tall pot's rim, and no lower than ARM1_MIN_GRIP_HEIGHT keeps the
-        fingertips clear of the shelf."""
+        """Grip height on a pot: high enough to clear the sill, low enough for the wrist to clear the rim."""
         h = pot.profile.height_mm / 1000
         return max(h + pot.profile.grasp_offset_z, h - ARM1_GRIP_BELOW_RIM, ARM1_MIN_GRIP_HEIGHT)
 
     def _plan_pour(self):
-        """Where arm 2 carries the can to (upright, above the pour start), the
-        straight drop from there to the pour start, and the pour tilt itself.
-        The first is a joint configuration, the other two are joint paths.
-
-        The can pours from off to one side of the pot: its spout tip sits just
-        inside the near rim, a little above it, so the water runs down the
-        inside of the pot. The tip height scales with the pot.
-
-        The tilt is about the can's own y axis (level, square to the spout),
-        the way you tip a jug forward, but it pivots on the spout tip rather
-        than on the gripper: the tip stays over one spot and the rest of the
-        can swings up around it. A short pot's rim is lower than an upright
-        can's spout, so there the tip starts higher and comes straight down
-        onto the pour point as the tilt lifts the can's body clear of the
-        platform, then holds still for the rest of the tilt.
-
-        The spout can come at the pot from any side (any heading about the
-        vertical). Arm 2 reaches best with its gripper pointing away from its
-        own base, so try headings in 10 deg steps, most 'pointing away' first;
-        among those, reject any that would tip the can past horizontal, and
-        keep the first where arm 2 reaches the whole tilt without hitting
-        anything."""
+        """Plan the pour: the carry to above the pot, the drop to the pour start, and the
+        tilt about the spout tip (just inside the rim). Tries every heading round the pot."""
         profile = self.current_pot.profile
         pot_xy = PLATFORM_POSITION.t[:2]
         rim_z = PLATFORM_TOP + profile.pour_clearance_z
@@ -1108,7 +1098,7 @@ class ShelfCareSequence:
         def tilt_by(angle):
             return SE3.Rt(R_can_in_tool @ SE3.Ry(angle).R @ R_can_in_tool.T, [0, 0, 0], check=False)
 
-        # corners of the can's body, relative to the spout tip, in the can's frame
+        # corners of the can body, measured from the spout tip
         half_l, half_w = WateringCanDuck.BODY_LENGTH / 2, WateringCanDuck.BODY_WIDTH / 2
         corners = np.array([[x, y, z] for x in (-half_l, half_l) for y in (-half_w, half_w)
                             for z in (0.0, WateringCanDuck.BODY_HEIGHT)]) - self.can.spout_tip_local
@@ -1119,7 +1109,7 @@ class ShelfCareSequence:
             poses = []
             for angle in np.linspace(0.0, POUR_ANGLE, POUR_STEPS):
                 R = R_carry @ tilt_by(angle).R
-                drop = -(corners @ (R @ R_can_in_tool).T)[:, 2].min()   # lowest body corner below the tip
+                drop = -(corners @ (R @ R_can_in_tool).T)[:, 2].min()   # how far the body hangs below the tip
                 tip = np.array([*tip_xy, max(rim_z, PLATFORM_TOP + POUR_FLOOR_MARGIN + drop)])
                 poses.append(SE3.Rt(R, tip - R @ tip_tool, check=False))
             return poses
@@ -1138,7 +1128,7 @@ class ShelfCareSequence:
         for _, poses in candidates:
             try:
                 q_above = solve_ik(self.arm2, up(poses[0], POUR_APPROACH_LIFT), self._last_q(self.arm2), slimit=50)
-                self._joint_path(self.arm2, q_above)
+                carry_qs = self._carry_path(self.arm2, q_above)
                 lower_qs = self._checked_line(self.arm2, q_above, poses[0])
                 pour_qs = follow_poses(self.arm2, lower_qs[-1], poses)
                 hit = self._first_collision(self.arm2, pour_qs)
@@ -1147,7 +1137,7 @@ class ShelfCareSequence:
             except PlanningError as e:
                 last_reason = str(e)
                 continue
-            return q_above, lower_qs, pour_qs
+            return carry_qs, lower_qs, pour_qs
         raise PlanningError(f"{self.arm2.name}: no reachable, collision-free, upright pour pose over "
                             f"{profile.pot_id} (last problem: {last_reason})")
 
@@ -1166,8 +1156,7 @@ class ShelfCareSequence:
         return self._last_q(arm)
 
     def _move_joint(self, arm, T_goal: SE3):
-        # seeded from a tidy pose so the IK converges, then turned into the
-        # equivalent nearest where the arm actually is (_move_joint_q)
+        # IK from a tidy seed pose, then the nearest equivalent (_move_joint_q)
         self._move_joint_q(arm, solve_ik(arm, T_goal, self._seed(arm, T_goal)))
 
     def _enqueue(self, arm, qs, transit_goal=None):
@@ -1192,6 +1181,31 @@ class ShelfCareSequence:
             raise PlanningError(f"{arm.name}: carry arc collides ({hit})")
         return qs
 
+    def _carry_path(self, arm, q_goal):
+        """Path to q_goal that keeps the can upright: a joint move, else level swings."""
+        q0 = self._last_q(arm)
+        can_in_tool = self._T_tool_obj.R
+        reason = ""
+        plans = [("joint move", lambda: self._timed_joint_move(arm, q0, q_goal))]
+        for hump in CARRY_HUMPS:
+            plans.append((f"level swing +{hump * 100:.0f} cm",
+                          lambda hump=hump: upright_move(arm, q0, arm.fkine(q_goal), hump)))
+        for name, plan in plans:
+            try:
+                qs = plan()
+            except PlanningError as e:
+                reason = str(e)
+                continue
+            lean = max(np.arccos(np.clip((arm.fkine(q).R @ can_in_tool)[2, 2], -1, 1)) for q in qs)
+            if lean > CARRY_MAX_TILT:
+                reason = f"{name} would tip the can {np.rad2deg(lean):.0f} deg"
+                continue
+            hit = self._first_collision(arm, qs)
+            if hit is None:
+                return qs
+            reason = f"{name} collides ({hit})"
+        raise PlanningError(f"{arm.name}: cannot carry the can upright ({reason})")
+
     def _joint_path(self, arm, q_goal, q0=None):
         q0 = self._last_q(arm) if q0 is None else q0
         home = _nearest(arm, ARM1_PARK if arm is self.arm1 else self._home2, q0)
@@ -1206,9 +1220,7 @@ class ShelfCareSequence:
         raise PlanningError(f"{arm.name}: every route collides ({hit})")
 
     def _timed_joint_move(self, arm, q_from, q_to):
-        """Joint move under both the joint speed limit and JOINT_MOVE_TCP_SPEED,
-        so a big swing doesn't fling the gripper round much faster than the
-        straight-line moves either side of it."""
+        """Joint move capped by both the joint speed and the gripper speed."""
         qs = joint_move(q_from, q_to, self._joint_speed(arm))
         if len(qs) > 1:
             p = arm.fkine(np.array(qs)).t
@@ -1264,12 +1276,9 @@ class ShelfCareSequence:
                 obs.append((pot_id, VCylinder(pot_id, pot.T.t, pot.profile.diameter_mm / 2000,
                                               pot.profile.height_mm / 1000)))
         if self.can is not self._held:
-            # the can stands square to the desk, so its body and handle are axis-aligned boxes
+            # the whole can, handle included, as one box
             base, can = self.can.T.t, WateringCanDuck
-            handle_height = can.HANDLE_TOP - can.BODY_HEIGHT
             obs.append(("watering can", Box("watering can", base + [0, 0, can.BODY_HEIGHT / 2], can.BODY_SIZE)))
-            obs.append(("watering can", Box("watering can", base + [0, 0, can.BODY_HEIGHT + handle_height / 2],
-                                            [can.HANDLE_SPAN, can.HANDLE_WIDTH, handle_height])))
         return obs
 
     def _held_spheres(self, arm, q):
@@ -1279,7 +1288,7 @@ class ShelfCareSequence:
         if isinstance(self._held, Pot):
             p = self._held.profile
             return cylinder(p.pot_id, T, p.diameter_mm / 2000, 0.0, p.height_mm / 1000)
-        # the box body as two columns of spheres side by side along its length
+        # can body as two columns of spheres
         can = WateringCanDuck
         r = can.BODY_WIDTH / 2
         halves = [cylinder("watering can", T * SE3(side * (can.BODY_LENGTH / 2 - r), 0, 0), r,
@@ -1298,7 +1307,7 @@ class ShelfCareSequence:
         if arm is self.arm2:
             self._finger_goal = WateringCanDuck.HANDLE_WIDTH / 2
         if arm is self.arm1:
-            self._arm1_finger_goal = obj.profile.diameter_mm / 2000   # close onto the pot wall
+            self._arm1_finger_goal = obj.profile.diameter_mm / 2000
         self._hold += GRIP_TICKS
 
     def _release(self):
@@ -1310,11 +1319,10 @@ class ShelfCareSequence:
         self._hold += GRIP_TICKS
 
     def _move_fingers(self, n):
-        """Both grippers close onto / open off what they hold over the grip pause."""
+        """Open or close both grippers a step each tick."""
         step = n * REBOT_FINGER_OPEN / GRIP_TICKS
         gap = self._finger_goal - self._scene.arm2_finger_opening
         self._scene.arm2_finger_opening += float(np.clip(gap, -step, step))
-        # TX2-60: same pace, from fully open onto the pot over the grip pause
         step1 = n * FINGER_OFFSET / GRIP_TICKS
         gap1 = self._arm1_finger_goal - self.arm1.finger_offset
         if gap1:
@@ -1329,21 +1337,11 @@ class ShelfCareSequence:
 # ---------------------------------------------------------------------
 
 class CollisionTest:
-    """Drops the loose object in front of a moving arm, twice, and checks
-    what the sequence does about it (run with --collision-test):
-
-      1. in front of arm 1 on its free move to the shelf: it should re-route
-         around the object and carry on;
-      2. in front of arm 1 as it carries the plant in a straight line: it
-         cannot change that path, so it should stop before the object, stay
-         stopped, and carry on only after the object is removed and the
-         operator acknowledges the stop and then resumes.
-
-    Call tick() once per pass of the main loop."""
+    """Scripted --collision-test: drop an object in arm 1's path twice (expect a re-route, then a stop)."""
 
     CASES = [(State.ARM1_TO_SHELF, "re-route"), (State.ARM1_TO_PLATFORM, "stop")]
-    MIN_WAYPOINTS = 25      # only drop the object while there is still this much of the move left
-    PAUSE_TICKS = 40        # how long the arm is left stopped before the object is taken away
+    MIN_WAYPOINTS = 25      # only drop while this much of the move is left
+    PAUSE_TICKS = 40        # ticks to stay stopped before removing the object
 
     def __init__(self, seq):
         self.seq = seq
@@ -1434,14 +1432,16 @@ def main():
         report(seq, test)
         return
 
-    # With the GUI the loop keeps running after the sequence ends, so the
-    # buttons (Reset in particular) still work. Close it with Ctrl+C.
+    # with the GUI the loop runs until Ctrl+C, so the buttons keep working
     from control_panel import ControlPanel
 
     seq.waiting = True          # nothing moves while the page loads: wait for Start / Resume
-    seq.keep_watching = True    # never 'done': water any plant whose moisture is turned down again
+    seq.keep_watching = test is None    # never 'done' (water any plant turned down again), except in the test
     panel, reported = ControlPanel(env, seq), False
+    from gamepad import GamepadJog
+    pad = GamepadJog(seq)
     while True:
+        pad.update()
         seq.step()
         if test is not None:
             test.tick()
@@ -1449,6 +1449,7 @@ def main():
         if seq.state == State.DONE and not reported:
             report(seq, test)
         reported = seq.state == State.DONE
+        scene.safety.show(seq.signal, seq.zone_breached)
         scene.refresh()
         env.step(DT)
 

@@ -5,11 +5,11 @@ Swift stacks its controls top to bottom in the order they are added, so the
 panel is laid out in sections under heading labels:
 
   status      mode + state + what to press
-  safety      E-STOP, Acknowledge, Resume, Pause/Hold, Reset, speed override
+  safety      E-STOP, Acknowledge, Resume, Pause/Hold, Reset, light curtain, speed override
   moisture    each plant's moisture level: shows the sensor reading, drag it
               down to its threshold to have that plant watered (again)
   mode        Auto / Manual
-  manual      arm, enable switch, J1-J6 sliders, gripper, go home
+  manual      arm, enable switch, J1-J6 sliders, gripper, go home, what the controller moves
   collision   the red box: where to drop it, drop it, take it away
 
 Controls that don't apply right now (jogging in Auto, Resume while stopped)
@@ -17,10 +17,29 @@ do nothing; the reason is printed in the terminal. All the logic lives in
 ShelfCareSequence; this file only wires the controls to it.
 """
 
+from importlib.metadata import PackageNotFoundError, version
+
 import numpy as np
 import swift
 
 ECHO_TICKS = 10         # ignore a joint slider for this long after the panel moves it (stale values echo back)
+
+
+try:
+    SWIFT_2 = int(version("swift-sim").split(".")[0]) >= 2
+except (PackageNotFoundError, ValueError):
+    SWIFT_2 = False
+
+
+def _radio_index(value):
+    """Index of the ticked radio option, whatever format Swift sends; None if none."""
+    if isinstance(value, (list, tuple)):
+        if not value:
+            return None
+        if all(isinstance(v, bool) for v in value):
+            return value.index(True) if True in value else None
+        value = value[0]
+    return int(float(value))
 
 
 def _number(value):
@@ -43,6 +62,7 @@ class ControlPanel:
         self._button("Start / Resume", seq.resume)
         self._button("Pause / Hold", seq.pause)
         self._button("Reset to start", seq.reset)
+        self.curtain = self._button("Break light curtain", lambda: seq.unsafe_zone(not seq.zone_breached))
         self._add(swift.Slider(cb=lambda v: seq.set_override(_number(v)), min=5, max=100, step=5, value=100,
                                desc="Speed override", unit="%"))
 
@@ -74,6 +94,9 @@ class ControlPanel:
         self._button("Gripper open", lambda: seq.jog_gripper(False))
         self._button("Gripper close", lambda: seq.jog_gripper(True))
         self._button("Go home", seq.jog_home)
+        self._add(swift.Select(cb=lambda i: seq.set_pad_target(int(_number(i))), desc="Controller moves",
+                               options=["Gripper (x, y, z)"] + [f"J{j + 1}" for j in range(6)], value=0))
+        self.pad_label = self._label("")
 
         self._label("------ COLLISION TEST (red box) ------")
         # the sliders aim the object; it enters the cell when a Drop button is pressed
@@ -103,7 +126,10 @@ class ControlPanel:
     # callback ignores a value the sim is already at, or it would loop forever.
 
     def _on_mode(self, index):
-        manual = int(_number(index)) == 1
+        index = _radio_index(index)
+        if index is None:
+            return
+        manual = index == 1
         if manual == self.seq.manual:
             return
         self.seq.set_manual(manual)
@@ -139,10 +165,23 @@ class ControlPanel:
             self._shown[key] = value
             setattr(element, attr, value)
 
+    def _show_radio(self, radio, index):
+        """Tick one radio option (Swift 2.x's page needs the plain index)."""
+        if SWIFT_2:
+            if radio._checked != index:     # also re-sends it if the page reported nothing ticked
+                radio._checked, radio._changed = index, True
+            return
+        key = (id(radio), "checked")
+        if self._shown.get(key) != index:
+            self._shown[key] = index
+            radio.checked = [i == index for i in range(len(radio.options))]
+
     def update(self):
         """Call once per pass of the main loop."""
         seq = self.seq
         self._set(self.status, "desc", seq.status)
+        self._set(self.pad_label, "desc", f"Xbox controller: {seq.pad_status} (left stick + triggers move, View = E-STOP)")
+        self._set(self.curtain, "desc", "Clear light curtain" if seq.zone_breached else "Break light curtain")
 
         self._tick += 1
 
@@ -153,14 +192,13 @@ class ControlPanel:
                 self._moisture_shown[pot_id] = slider.value = value
                 self._moisture_synced[pot_id] = self._tick
 
-        self._set(self.mode, "checked", [not seq.manual, seq.manual])
+        self._show_radio(self.mode, int(seq.manual))
         if self._shown.get("enable") != seq.jog_enabled:
             # set it directly: swift's Checkbox prints every value given to its setter
             self._shown["enable"] = seq.jog_enabled
             self.enable._checked, self.enable._changed = [seq.jog_enabled], True
 
-        # point the joint sliders at the jogged arm's goal whenever it changes
-        # other than by dragging a slider (new arm, jog refused, home...)
+        # re-point the joint sliders when the jogged arm changes other than by dragging
         if seq.jog_version != self._jog_version:
             self._jog_version = seq.jog_version
             arm = seq.jog_arm

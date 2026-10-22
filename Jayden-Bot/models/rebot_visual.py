@@ -1,13 +1,48 @@
-"""Mesh is the visual twin of the rebot_b601_dm, mainly used for the swift visuals but does not have an input in the kinematics """
+"""Visual twin of the reBot DH model: the real URDF meshes, posed from the DH joint angles. Drawing only."""
+
+import os
+import re
+import xml.etree.ElementTree as ET
 
 import numpy as np
 import roboticstoolbox as rtb
 from spatialmath import SE3
 
+
+def urdf_mesh_colours(urdf_path):
+    """Colour of each visual mesh file, from the URDF's materials."""
+    root = ET.parse(urdf_path).getroot()
+    rgba = {m.get("name"): [float(v) for v in m.find("color").get("rgba").split()]
+            for m in root.findall("material") if m.find("color") is not None}
+    colours = {}
+    for visual in root.iter("visual"):
+        mesh, material = visual.find("geometry/mesh"), visual.find("material")
+        if mesh is not None and material is not None and material.get("name") in rgba:
+            colours[os.path.basename(mesh.get("filename"))] = rgba[material.get("name")]
+    return colours
+
+def load_urdf(urdf_path):
+    """Load the URDF without its collision meshes (the sim checks collisions with its own shapes)."""
+    try:
+        from roboticstoolbox.models.URDF.URDFRobot import URDF_file
+    except ImportError:
+        return rtb.ERobot.URDF(urdf_path)
+    drop_collision = lambda text: re.sub(r"<collision>.*?</collision>", "", text, flags=re.S)
+    links, name, _ = URDF_file(urdf_path, patch=drop_collision)
+    return rtb.Robot(links, name=name)
+
+
 class ReBotVisual:
-    """wrap the URDF reBot for swift rendering uses call update(q) in each tick to update with the current joint values and then updates them here """
+    """The URDF reBot for Swift. Call update() each tick with the DH joint angles."""
     def __init__(self, urdf_path: str, dh_tool: SE3, base: SE3 = None):
-        self.robot = rtb.ERobot.URDF(urdf_path)
+        self.robot = load_urdf(urdf_path)
+        # the toolbox loads every part grey, so paint each one with its URDF material
+        colours = urdf_mesh_colours(urdf_path)
+        for link in self.robot.links:
+            for shape in link.geometry:
+                name = os.path.basename(shape.filename or "")
+                if name in colours:
+                    shape.color = colours[name]
         if base is not None:
             self.robot.base = base
         self._dh_tool = dh_tool

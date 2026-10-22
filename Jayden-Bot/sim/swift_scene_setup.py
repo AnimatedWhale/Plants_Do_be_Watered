@@ -1,19 +1,9 @@
 """
-ShelfCare Swift scene setup.
-
-Two robots on one desk, each object at a fixed (predetermined) location:
-  - Stäubli TX2-60 (arm 1), bolted to the desk under a wall shelf
-  - reBot B601-DM (arm 2), bolted to the other end of the desk
-  - wall shelf of potted plants, above/behind arm 1
-  - handover platform on the desk, reachable by both arms
-  - watering-can holder beside arm 2, with the can on it
-
-Story: arm 1 lifts a plant off the shelf and puts it on the platform; arm 2
-picks up the watering can, waters the plant and puts the can back; arm 1
-returns the plant to its shelf slot.
+ShelfCare Swift scene: the room with its window sill and plants, the desk, both
+arms, the platform, the watering can and the safety equipment.
 
 build_scene() is shared with Selfcare_sequence.py so both use one layout.
-Run this file on its own just to look at the scene:
+To just look at the scene:
     python Jayden-Bot/sim/swift_scene_setup.py
 """
 
@@ -66,16 +56,8 @@ try:
 except ImportError:
     pass
 
-# Two fixes to Swift's page server so mesh models (the reBot URDF meshes, the
-# duck can) load on Windows. Without them the browser shows "Application
-# error: a client-side exception has occurred" and the sim crashes with
-# ValueError: invalid literal for int() ... 'Connected'.
-#  1. The browser asks for a mesh as /retrieve/C:/Users/...; Swift opens
-#     "/C:/Users/...", which doesn't exist on Windows, so every mesh 404s.
-#     Drop the slash in front of the drive letter.
-#  2. It serves one request at a time with a 5-deep queue, and Windows resets
-#     connections that overflow it while ~40 meshes load at once. Serve
-#     requests in parallel with a deeper queue.
+# Fixes Swift's page server on Windows so the meshes load: drop the slash before the
+# drive letter in mesh paths (else 404), and serve requests in parallel (else resets).
 try:
     import re
     import socketserver
@@ -95,25 +77,34 @@ try:
 
             super().__init__(address, WindowsPathHandler, *args, **kwargs)
 
-    SwiftRoute.socketserver = types.SimpleNamespace(TCPServer=_ParallelServer)
+    # swift 1.1 asks for TCPServer, swift 2.x for ThreadingTCPServer: give it both
+    SwiftRoute.socketserver = types.SimpleNamespace(TCPServer=_ParallelServer,
+                                                    ThreadingTCPServer=_ParallelServer)
 except ImportError:
     pass
 
 
 TABLE_HEIGHT = 0.75
-TABLE_SIZE = [1.4, 0.9, 0.03]      # 0.9 m deep (y -0.2 .. 0.7) so arm 1 can sit back from the shelf
+TABLE_SIZE = [1.4, 0.9, 0.03]      # 0.9 m deep so arm 1 can sit back from the sill
 TABLE_CENTRE = SE3(0.7, 0.25, TABLE_HEIGHT - TABLE_SIZE[2] / 2)
 
+# The room: one long wall behind the desk with a wide window in it. The plants
+# sit on the window sill (still called the shelf in the code).
 WALL_Y = 0.75
-WALL_SIZE = [1.4, 0.02, 1.2]
-WALL_CENTRE = SE3(0.7, WALL_Y + WALL_SIZE[1] / 2, TABLE_HEIGHT + WALL_SIZE[2] / 2)
+ROOM_X = (-1.5, 2.9)                # the wall runs this far along x
+ROOM_HEIGHT = 2.4
+WALL_SIZE = [ROOM_X[1] - ROOM_X[0], 0.02, ROOM_HEIGHT]
+WALL_CENTRE = SE3(sum(ROOM_X) / 2, WALL_Y + WALL_SIZE[1] / 2, ROOM_HEIGHT / 2)
+FLOOR_DEPTH = 3.0                   # how far the floor runs out from the wall
+FLOOR_TOP = 0.01                    # just above Swift's own ground grid, so they don't flicker
 SHELF_HEIGHT = 0.95                # lowered from 1.05 so arm 1 reaches the plants without being cramped
 SHELF_SIZE = [0.70, 0.20, 0.02]
 SHELF_CENTRE = SE3(0.25, WALL_Y - SHELF_SIZE[1] / 2, SHELF_HEIGHT - SHELF_SIZE[2] / 2)
+WINDOW_X = (-0.6, 1.4)              # the window opening, behind both arms
+WINDOW_Z = (SHELF_HEIGHT, 1.85)     # its bottom is the sill the plants sit on
 
 ARM1_BASE = SE3(0.25, -0.02, TABLE_HEIGHT)   # set back from the shelf (was y = 0.12): more room to move
-# Turned to face the platform: the reBot's waist only turns +/-160 deg, and
-# unturned the platform sits in the gap behind it.
+# turned 180 deg: the reBot's waist only turns +/-160 deg, and the platform is behind it
 ARM2_BASE = SE3(1.05, 0.20, TABLE_HEIGHT) * SE3.Rz(np.pi)
 
 ARM1_PARK = np.deg2rad([150, 0, 90, 0, 0, 0])
@@ -127,15 +118,20 @@ CAN_HOLDER_HEIGHT = 0.10
 CAN_HOLDER_TOP = TABLE_HEIGHT + CAN_HOLDER_HEIGHT
 
 REBOT_TOOL = None
-REBOT_FINGER_OPEN = 0.025       # each finger's travel from centre when the gripper is open (m)
-REBOT_URDF_PATH = str(Path(__file__).resolve().parents[1] / "models" / "rebot_description" / "urdf" / "ReBot_Arm_DM.urdf")
+REBOT_FINGER_OPEN = 0.016       # each finger's travel from centre when open (m); fits the gap under the can handle
+REBOT_URDF_DIR = Path(__file__).resolve().parents[1] / "models" / "rebot_description" / "urdf"
+REBOT_URDF_FULL = str(REBOT_URDF_DIR / "ReBot_Arm_DM.urdf")
+REBOT_URDF_LITE = str(REBOT_URDF_DIR / "ReBot_Arm_DM_lite.urdf")    # simplified meshes, for slower computers
+REBOT_URDF_PATH = REBOT_URDF_FULL       # run_lite.py switches this to REBOT_URDF_LITE
 CAN_MESH_PATH = str(Path(__file__).resolve().parents[1] / "models" / "duck_watering_can.stl")
 
-# Safety gear. The guards sit just outside the space the arms sweep through.
-GUARD_X = (-0.40, 1.50)         # left and right side guards
-CURTAIN_Y = -0.15               # light curtain across the open front
+# Safety gear. The light curtains sit just outside the space the arms sweep through.
+# Sized from both arms' full reach (gripper over every joint angle: x -0.57..1.79, y down to -0.83)
+# plus 0.2 m for a held pot or can, so neither arm can reach out of the zone.
+GUARD_X = (-0.80, 2.00)         # left and right light curtains
+CURTAIN_Y = -1.05               # front light curtain
 GUARD_HEIGHT = 1.80
-GUARD_BACK_Y = WALL_Y + WALL_SIZE[1]
+GUARD_BACK_Y = WALL_Y - 0.02    # the back posts stand against the wall
 HIDDEN = SE3(0, 0, -20)         # where a shape goes when it should not be seen
 YELLOW = [0.95, 0.8, 0.1, 1]
 
@@ -144,12 +140,45 @@ def build_table():
     return geometry.Cuboid(scale=TABLE_SIZE, pose=TABLE_CENTRE, color=[0.75, 0.6, 0.45, 1])
 
 
-def build_wall():
-    return geometry.Cuboid(scale=WALL_SIZE, pose=WALL_CENTRE, color=[0.85, 0.85, 0.9, 0.25])
+def _box(x0, x1, y0, y1, z0, z1, colour):
+    """A box given by its x, y and z ranges."""
+    return geometry.Cuboid(scale=[x1 - x0, y1 - y0, z1 - z0],
+                           pose=SE3((x0 + x1) / 2, (y0 + y1) / 2, (z0 + z1) / 2), color=colour)
+
+
+def build_room():
+    """Floor, desk legs, and the wall with its window (frame only, so it's see-through)."""
+    paint, frame = [0.93, 0.91, 0.86, 1], [0.97, 0.97, 0.95, 1]
+    (x0, x1), (wx0, wx1), (wz0, wz1) = ROOM_X, WINDOW_X, WINDOW_Z
+    y0, y1 = WALL_Y, WALL_Y + WALL_SIZE[1]
+    shapes = [
+        _box(x0, x1, WALL_Y - FLOOR_DEPTH, y1, 0.0, FLOOR_TOP, [0.62, 0.62, 0.60, 1]),     # floor
+        # wall, in four pieces around the window opening
+        _box(x0, x1, y0, y1, 0.0, wz0, paint),
+        _box(x0, x1, y0, y1, wz1, ROOM_HEIGHT, paint),
+        _box(x0, wx0, y0, y1, wz0, wz1, paint),
+        _box(wx1, x1, y0, y1, wz0, wz1, paint),
+        # window frame: bottom rail, head, two jambs, two mullions
+        _box(wx0, wx1, y0, y1 + 0.01, wz0, wz0 + 0.03, frame),
+        _box(wx0, wx1, y0, y1 + 0.01, wz1 - 0.05, wz1, frame),
+        _box(wx0, wx0 + 0.05, y0, y1 + 0.01, wz0, wz1, frame),
+        _box(wx1 - 0.05, wx1, y0, y1 + 0.01, wz0, wz1, frame),
+        _box(wx0 + (wx1 - wx0) / 3 - 0.02, wx0 + (wx1 - wx0) / 3 + 0.02, y0, y1 + 0.01, wz0, wz1, frame),
+        _box(wx0 + 2 * (wx1 - wx0) / 3 - 0.02, wx0 + 2 * (wx1 - wx0) / 3 + 0.02, y0, y1 + 0.01, wz0, wz1, frame),
+    ]
+    # desk legs, so the desk stands on the floor
+    leg = 0.05
+    tx0, tx1 = TABLE_CENTRE.t[0] - TABLE_SIZE[0] / 2, TABLE_CENTRE.t[0] + TABLE_SIZE[0] / 2
+    ty0, ty1 = TABLE_CENTRE.t[1] - TABLE_SIZE[1] / 2, TABLE_CENTRE.t[1] + TABLE_SIZE[1] / 2
+    for lx in (tx0 + 0.05, tx1 - 0.05 - leg):
+        for ly in (ty0 + 0.05, ty1 - 0.05 - leg):
+            shapes.append(_box(lx, lx + leg, ly, ly + leg, FLOOR_TOP, TABLE_HEIGHT - TABLE_SIZE[2], [0.45, 0.35, 0.25, 1]))
+    return shapes
 
 
 def build_shelf():
-    return geometry.Cuboid(scale=SHELF_SIZE, pose=SHELF_CENTRE, color=[0.9, 0.9, 0.88, 1])
+    """The window sill the plants sit on: a painted board level with the bottom of the window."""
+    return geometry.Cuboid(scale=SHELF_SIZE, pose=SHELF_CENTRE, color=[0.96, 0.96, 0.93, 1])
 
 
 def build_platform():
@@ -169,8 +198,7 @@ def build_can_holder():
 
 
 class Pot:
-    """Potted plant: a cylinder pot with a sphere of foliage. Its frame sits
-    at the bottom centre of the pot, z up, so its pose is where it stands."""
+    """Potted plant (pot + foliage). Its frame is the bottom centre of the pot."""
 
     def __init__(self, profile, pose: SE3):
         self.profile = profile
@@ -193,38 +221,37 @@ class Pot:
 
 
 class WateringCanDuck:
-    """Duck watering can (Bunnings Garden Basics 1.6 L), drawn from
-    models/duck_watering_can.stl. Sizes are measured off the real can.
+    """Duck watering can, drawn from duck_watering_can.stl (sizes measured off the real can).
+    Frame: bottom centre of the body, z up, x toward the spout."""
 
-    Frame: bottom centre of the body, z up, x toward the spout. The handle
-    bar runs along x. The real can is front heavy; the sim ignores that."""
+    # The STL is in mm with its origin off to one side; this puts it in metres on the can frame.
+    MESH_SCALE = 0.001
+    MESH_OFFSET = SE3(0.0, 0.0625, 0.050)
 
-    BODY_LENGTH = 0.200             # along local x
-    BODY_WIDTH = 0.125              # along local y
-    BODY_HEIGHT = 0.160
+    BODY_LENGTH = 0.200             # along local x, not counting the bill
+    BODY_WIDTH = 0.110              # along local y
+    BODY_HEIGHT = 0.160             # up to the top of the head
     BODY_SIZE = [BODY_LENGTH, BODY_WIDTH, BODY_HEIGHT]
 
-    HANDLE_TOP = 0.230              # top of the handle bar above the base
-    HANDLE_SPAN = 0.140             # along local x
-    HANDLE_WIDTH = 0.020            # bar width
-    HANDLE_BAR_HEIGHT = 0.220       # centre of the bar above the base
-    GRIP_DROP = 0.030               # grip point below the top of the handle
-    SPOUT_REACH = 0.150             # spout tip ahead of the grip point, along local x
+    HANDLE_TOP = 0.150              # top of the handle bar above the base
+    HANDLE_WIDTH = 0.020            # bar thickness, what the fingers close on
+    HANDLE_BAR_HEIGHT = 0.140       # centre of the bar above the base
+    GRIP_X = -0.055                 # where along the bar the gripper holds it (biggest gap under the bar)
+    GRIP_DROP = 0.030               # measured grip point, below the top of the handle
 
-    SPOUT_ROOT = [0.100, 0.0, 0.120]    # where the spout starts
-    SPOUT_TIP_HEIGHT = 0.190
-    SPOUT_RADIUS = 0.022
+    SPOUT_ROOT = [0.100, 0.0, 0.120]    # where the bill leaves the head
+    SPOUT_TIP = [0.120, 0.0, 0.120]     # end of the bill
 
     COLOUR = [0.95, 0.80, 0.10, 1]
 
     def __init__(self, pose: SE3):
-        self.mesh = geometry.Mesh(CAN_MESH_PATH, color=self.COLOUR)
+        self.mesh = geometry.Mesh(CAN_MESH_PATH, scale=[self.MESH_SCALE] * 3, color=self.COLOUR)
 
-        self.handle_grip_local = np.array([0.0, 0.0, self.HANDLE_TOP - self.GRIP_DROP])
-        self.handle_bar_local = np.array([0.0, 0.0, self.HANDLE_BAR_HEIGHT])
+        self.handle_grip_local = np.array([self.GRIP_X, 0.0, self.HANDLE_TOP - self.GRIP_DROP])
+        self.handle_bar_local = np.array([self.GRIP_X, 0.0, self.HANDLE_BAR_HEIGHT])
         self.handle_bar_direction_local = np.array([1.0, 0.0, 0.0])
         self.bill_root_local = np.array(self.SPOUT_ROOT)
-        self.spout_tip_local = np.array([self.SPOUT_REACH, 0.0, self.SPOUT_TIP_HEIGHT])
+        self.spout_tip_local = np.array(self.SPOUT_TIP)
 
         self.set_pose(pose)
 
@@ -234,15 +261,14 @@ class WateringCanDuck:
 
     def set_pose(self, T: SE3):
         self.T = T
-        self.mesh.T = T.A
+        self.mesh.T = (T * self.MESH_OFFSET).A
 
 
 class DroppedObject:
-    """A red box that can be dropped into the cell to test collisions.
-    `version` goes up every time it moves, so the sequence knows to re-check."""
+    """Red test box dropped into the cell. `version` changes whenever it moves."""
 
     SIZE = [0.08, 0.08, 0.08]
-    STOWED = [0.70, -0.30, 0.04]
+    STOWED = [0.70, -1.20, FLOOR_TOP + 0.04]       # on the floor outside the light curtain
     DROP_HEIGHT = 0.40      # falls from this high
     DROP_PER_FRAME = 0.05
 
@@ -275,22 +301,18 @@ class DroppedObject:
 
 
 def guard_boxes():
-    """Side guards and light curtain posts as (name, centre, size)."""
-    depth = GUARD_BACK_Y - CURTAIN_Y
-    boxes = []
-    for x in GUARD_X:
-        boxes.append(("side guard", [x, CURTAIN_Y + depth / 2, GUARD_HEIGHT / 2], [0.01, depth, GUARD_HEIGHT]))
-        boxes.append(("light curtain post", [x, CURTAIN_Y, GUARD_HEIGHT / 2], [0.04, 0.04, GUARD_HEIGHT]))
-    return boxes
+    """The four light curtain posts as (name, centre, size)."""
+    return [("light curtain post", [x, y, GUARD_HEIGHT / 2], [0.04, 0.04, GUARD_HEIGHT])
+            for x in GUARD_X for y in (CURTAIN_Y, GUARD_BACK_Y)]
 
 
 class SafetyEquipment:
     """Safety gear from the risk assessment:
-      - side guards: stop people being hit from the ends of the desk
-      - light curtain: senses someone reaching in from the front
+      - light curtains on the three open sides (the wall closes the back):
+        sense anyone reaching in, which pauses the arms
       - signal tower: shows the cell state (green run, amber paused, red stopped)
       - e-stop station: a stop button outside the cell, within reach
-      - yellow markings: keep-out area at the platform, stand-back line on the floor
+      - yellow markings: keep-out area at the platform, stand-back lines on the floor
     """
 
     LAMPS = {   # name: (height above the post, lit colour, unlit colour)
@@ -304,13 +326,13 @@ class SafetyEquipment:
         left, right = GUARD_X
         mid_x, width = (left + right) / 2, right - left
 
-        self.fixed = []
-        for name, centre, size in guard_boxes():
-            colour = [0.6, 0.8, 0.9, 0.15] if name == "side guard" else YELLOW
-            self.fixed.append(geometry.Cuboid(scale=size, pose=SE3(centre), color=colour))
-        # stand-back line on the floor and keep-out disc under the platform
-        self.fixed.append(geometry.Cuboid(scale=[width, 0.05, 0.004], pose=SE3(mid_x, CURTAIN_Y - 0.30, 0.002),
-                                          color=YELLOW))
+        self.fixed = [geometry.Cuboid(scale=size, pose=SE3(centre), color=YELLOW)
+                      for _, centre, size in guard_boxes()]
+        # stand-back lines on the floor around the three open sides, and the keep-out disc under the platform
+        line_y0 = CURTAIN_Y - 0.30
+        self.fixed.append(_box(left - 0.30, right + 0.30, line_y0 - 0.025, line_y0 + 0.025, FLOOR_TOP, FLOOR_TOP + 0.004, YELLOW))
+        for x in (left - 0.30, right + 0.30):
+            self.fixed.append(_box(x - 0.025, x + 0.025, line_y0, GUARD_BACK_Y, FLOOR_TOP, FLOOR_TOP + 0.004, YELLOW))
         self.fixed.append(geometry.Cylinder(radius=0.20, length=0.002,
                                             pose=SE3(*PLATFORM_POSITION.t[:2], TABLE_HEIGHT + 0.001), color=YELLOW))
         # e-stop station on the outside of the right post
@@ -328,11 +350,17 @@ class SafetyEquipment:
             pose = SE3(right, CURTAIN_Y, GUARD_HEIGHT + height)
             self.lamps[name] = (geometry.Cylinder(radius=0.035, length=0.06, color=lit),
                                 geometry.Cylinder(radius=0.035, length=0.06, color=unlit), pose)
+        # beams on the front (along x) and both sides (along y)
+        depth, mid_y = GUARD_BACK_Y - CURTAIN_Y, (GUARD_BACK_Y + CURTAIN_Y) / 2
+        runs = [(SE3(mid_x, CURTAIN_Y, 0) * SE3.Ry(np.pi / 2), width)]
+        runs += [(SE3(x, mid_y, 0) * SE3.Rx(np.pi / 2), depth) for x in GUARD_X]
         self.beams = []
-        for z in self.BEAM_HEIGHTS:
-            pose = SE3(mid_x, CURTAIN_Y, z) * SE3.Ry(np.pi / 2)
-            self.beams.append((geometry.Cylinder(radius=0.008, length=width, color=[1.0, 0.0, 0.0, 1]),
-                               geometry.Cylinder(radius=0.004, length=width, color=[0.9, 0.2, 0.2, 0.35]), pose))
+        for start, length in runs:
+            for z in self.BEAM_HEIGHTS:
+                pose = SE3(0, 0, z) * start
+                self.beams.append((geometry.Cylinder(radius=0.008, length=length, color=[1.0, 0.0, 0.0, 1]),
+                                   geometry.Cylinder(radius=0.004, length=length, color=[0.9, 0.2, 0.2, 0.35]),
+                                   pose))
         # someone's arm reaching in, shown while the curtain is broken
         self.intruder = geometry.Cuboid(scale=[0.08, 0.30, 0.06], color=[0.9, 0.7, 0.55, 1])
         self.intruder_pose = SE3(mid_x, CURTAIN_Y, 1.0)
@@ -367,9 +395,7 @@ def _segment_pose(p0, p1):
 
 
 class StickFigure:
-    """Swift can't render an rtb.DHRobot (it has no link geometry), so this
-    draws one as cylinders between its joint frames, in world coordinates.
-    Call update() after changing robot.q."""
+    """Draws a DH robot as cylinders between its joint frames (Swift can't draw a DHRobot)."""
 
     def __init__(self, robot, radius=0.022, color=(0.3, 0.45, 0.8, 1), joint_color=(0.2, 0.2, 0.25, 1)):
         self.robot = robot
@@ -453,6 +479,8 @@ def build_scene(env=None, pot_profiles=()) -> Scene:
 
     figures = []
     if env is not None:
+        for shape in build_room():
+            env.add(shape)
         env.add(build_table())
         for arm in (arm1, arm2):
             if arm is arm2:
@@ -472,7 +500,8 @@ def build_scene(env=None, pot_profiles=()) -> Scene:
         env.add(hazard.shape)
         for shape in safety.shapes:
             env.add(shape)
-        env.add(build_wall())
+        if hasattr(env, "set_camera_pose"):
+            env.set_camera_pose([0.6, -3.2, 2.3], [0.6, 0.0, 0.9])     # from in front of the zone, looking at the desk
         env.step()
 
     return Scene(env, arm1, arm2, rebot_visual, can, pots, figures, static_obstacles(), hazard, safety)

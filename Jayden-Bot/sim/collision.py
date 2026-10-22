@@ -99,9 +99,7 @@ def clearance(a: Spheres, obstacle) -> float:
 # ---------------------------------------------------------------------
 
 def link_capsules(robot, q, radii, last_frame):
-    """Capsules between consecutive DH frame origins from frame 1 to
-    `last_frame` (the fixed base column is skipped).
-
+    """Capsules between consecutive DH frame origins, frame 1 to `last_frame`.
     radii[i] is the radius of the link from frame i+1 to frame i+2."""
     pts = [T.t for T in robot.fkine_all(q)]
     return [
