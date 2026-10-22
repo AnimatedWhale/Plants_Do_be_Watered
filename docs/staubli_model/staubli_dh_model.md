@@ -1,6 +1,6 @@
 # Stäubli TX2-60: DH parameters
 
-Hand-drawn full DH diagram: `dh_full_diagram.jpg` (to be added).
+
 
 Reference frame diagram:
 
@@ -20,16 +20,16 @@ Sanity check: a2 + d4 + d6 = 290 + 310 + 70 = **670 mm**, which is the reach St�
 
 ## Standard DH table (used by the code)
 
-T<sub>i</sub> = Rz(θ<sub>i</sub>) · Tz(d<sub>i</sub>) · Tx(a<sub>i</sub>) · Rx(α<sub>i</sub>)
+Ti = Rz(θi) · Tz(di) · Tx(ai) · Rx(αi)
 
-| i | θ<sub>i</sub> | d<sub>i</sub> (m) | a<sub>i</sub> (m) | α<sub>i</sub> | Joint limits [1] |
-|---|---|---|---|---|---|
-| 1 | q1 | 0.375 | 0 | −π/2 | ±180° |
-| 2 | q2 − π/2 | 0 | 0.290 | 0 | ±127.5° |
-| 3 | q3 + π/2 | 0.020 | 0 | +π/2 | ±152.5° |
-| 4 | q4 | 0.310 | 0 | −π/2 | ±270° |
-| 5 | q5 | 0 | 0 | +π/2 | −121° / +132.5° |
-| 6 | q6 | 0.070 | 0 | 0 | ±270° |
+| i |      θi       |      di (m)       |     ai (m)        |     αi        | Joint limits [1] |
+|---|---------------|-------------------|-------------------|---------------|------------------|
+| 1 |      q1       |      0.375        |        0          |    −π/2       |      ±180°       |
+| 2 |   q2 − π/2    |        0          |      0.290        |      0        |     ±127.5°      |
+| 3 |   q3 + π/2    |      0.020        |        0          |    +π/2       |     ±152.5°      |
+| 4 |      q4       |      0.310        |        0          |    −π/2       |      ±270°       |
+| 5 |      q5       |        0          |        0          |    +π/2       |  −121° / +132.5° |
+| 6 |      q6       |      0.070        |        0          |      0        |      ±270°       |
 
 Tool: `SE3(0, 0, 0.15)` for a 150 mm gripper. The fingers have to reach past the centre of the widest pot (160 mm) and open to 170 mm. Measure yours and change `GRIPPER_LENGTH` / `FINGER_OFFSET` in `models/staubli_tx2_60.py`.
 
