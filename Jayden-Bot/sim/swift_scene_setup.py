@@ -492,6 +492,9 @@ def build_scene(env=None, pot_profiles=()) -> Scene:
                     env.add(shape)
             else:
                 env.add(arm)
+        if arm1.base_mesh is not None:          # the TX2-60's base doesn't move with J1, so it's added on its own
+            arm1.base_mesh.T = arm1.base.A
+            env.add(arm1.base_mesh)
         env.add(build_shelf())
         env.add(build_platform())
         env.add(build_can_holder())

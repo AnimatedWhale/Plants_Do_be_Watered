@@ -6,3 +6,4 @@ spatialmath-python
 swift-sim
 numpy<2
 websockets<14   # swift-sim 1.1 crashes on start ("no running event loop") with websockets 14+
+pygame          # optional: Xbox controller jogging (gamepad.py skips it if missing)

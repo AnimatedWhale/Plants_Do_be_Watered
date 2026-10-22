@@ -19,6 +19,7 @@ import numpy as np
 ARM_MARGIN = 0.01         # arm links vs furniture / objects
 ARM_ARM_MARGIN = 0.02     # one arm vs the other
 HELD_TOLERANCE = 0.003    # a held object may touch (rest on) a surface, not sink into it
+TX2_UPPER_ARM_SIDE = 0.1725   # TX2-60 upper arm centre, beside the shoulder along J2 (link_2 mesh y 128-217 mm)
 
 
 # ---------------------------------------------------------------------
@@ -113,6 +114,11 @@ def tx2_60_body(dh_twin, q, gripper_length, finger_offset):
     """TX2-60 links up to the flange, then the palm (a bar across tool y) and
     two fingers, matching _gripper_geometry in the model."""
     parts = link_capsules(dh_twin, q, radii=[0.06, 0.06, 0.05, 0.04, 0.04], last_frame=6)
+    # The real upper arm (Stäubli's link_2 mesh) runs beside the shoulder, centred
+    # TX2_UPPER_ARM_SIDE along the J2 axis (DH z1), not on the shoulder-elbow line
+    frames = dh_twin.fkine_all(q)
+    side = TX2_UPPER_ARM_SIDE * frames[1].R[:, 2]
+    parts.append(capsule(f"{dh_twin.name} upper arm", frames[1].t + side, frames[2].t + side, 0.07))
     tcp = dh_twin.fkine(q)
     z, y = tcp.R[:, 2], tcp.R[:, 1]
     flange = tcp.t - gripper_length * z
