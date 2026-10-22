@@ -1,7 +1,7 @@
 # Tested with Python 3.11 on Windows:
 # roboticstoolbox-python 1.4.4, spatialgeometry 1.4.1, swift-sim 1.1.0
-roboticstoolbox-python
-spatialgeometry
+roboticstoolbox-python>=1.4.4   # 1.3 puts the TX2-60 gripper 150 mm out and can't find the reBot meshes
+spatialgeometry>=1.4
 spatialmath-python
 swift-sim
 numpy<2

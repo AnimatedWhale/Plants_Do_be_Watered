@@ -24,6 +24,31 @@ from pathlib import Path
 for _root in Path(__file__).resolve().parents[1:3]:
     sys.path.insert(0, str(_root))
 
+from importlib.metadata import PackageNotFoundError, version
+
+# Older toolboxes break this sim in confusing ways: roboticstoolbox 1.3 puts
+# the TX2-60's gripper 150 mm out (the arm can't reach the pots), and looks
+# for the reBot's meshes in the wrong folder, so the Swift page crashes and
+# Python prints a websockets "ConnectionClosedError". Usually it means the
+# wrong Python environment was picked, so stop with a clear message instead.
+_NEEDED = {"roboticstoolbox-python": (1, 4), "spatialgeometry": (1, 4)}
+_too_old = []
+for _package, _minimum in _NEEDED.items():
+    try:
+        _have = version(_package)
+    except PackageNotFoundError:
+        _have = "not installed"
+    if _have == "not installed" or tuple(int(p) for p in _have.split(".")[:2]) < _minimum:
+        _too_old.append(f"  {_package}: need {'.'.join(map(str, _minimum))} or newer, this Python has {_have}")
+if _too_old:
+    sys.exit("This Python environment's packages are too old for the ShelfCare sim:\n" + "\n".join(_too_old)
+             + f"\n(running {sys.executable})\n"
+             "Make a fresh environment for this project (upgrading an old one in place can leave\n"
+             "spatialgeometry half-replaced), from the Plants_Do_be_Watered folder:\n"
+             "  py -3.11 -m venv C:\\venvs\\shelfcare\n"
+             "  C:\\venvs\\shelfcare\\Scripts\\python.exe -m pip install -r requirements.txt\n"
+             "then run the sim with C:\\venvs\\shelfcare\\Scripts\\python.exe (or pick it in VS Code).")
+
 import numpy as np
 import roboticstoolbox as rtb
 import spatialgeometry as geometry
